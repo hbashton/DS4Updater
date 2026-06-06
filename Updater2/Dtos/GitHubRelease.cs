@@ -1,6 +1,7 @@
-﻿namespace DS4Updater.Dtos
+namespace DS4Updater.Dtos
 {
-    // Check this linkg for the avalaible options 
-    // https://api.github.com/repos/schmaldeo/DS4Windows/releases/latest
-    public record GitHubRelease(string tag_name);
+    // https://docs.github.com/en/rest/releases/releases?apiVersion=2022-11-28
+    public record GitHubRelease(string tag_name, GitHubReleaseAsset[] assets);
+
+    public record GitHubReleaseAsset(string name, string browser_download_url);
 }

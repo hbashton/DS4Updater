@@ -42,12 +42,17 @@ namespace DS4Updater
     public partial class MainWindow : Window
     {
         private const string CUSTOM_EXE_CONFIG_FILENAME = "custom_exe_name.txt";
+        private const string DS4WINDOWS_RELEASES_API_URI = "https://api.github.com/repos/hbashton/DS4Windows/releases";
+        private const string DS4WINDOWS_RELEASE_DOWNLOAD_BASE_URI = "https://github.com/hbashton/DS4Windows/releases/download";
         //WebClient wc = new WebClient(), subwc = new WebClient();
         private HttpClient wc = new HttpClient();
+        private static readonly Regex releaseVersionRegex = new Regex(@"\d+(?:\.\d+){1,3}", RegexOptions.Compiled);
         protected string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "DS4Windows");
         string exepath = AppContext.BaseDirectory;
         string version = "0", newversion = "0";
+        string newversionTag = "";
+        Uri newversionDownloadUri = null;
         bool downloading = false;
         private int round = 1;
         public bool downloadLang = false;
@@ -59,6 +64,90 @@ namespace DS4Updater
         internal string arch = Environment.Is64BitProcess ? "x64" : "x86";
         private string custom_exe_name_path;
         public string CustomExeNamePath { get => custom_exe_name_path; }
+
+        private static bool TryParseReleaseVersion(string versionText, out Version parsedVersion)
+        {
+            parsedVersion = new Version(0, 0, 0);
+            if (string.IsNullOrWhiteSpace(versionText)) return false;
+
+            Match versionMatch = releaseVersionRegex.Match(versionText);
+            return versionMatch.Success && Version.TryParse(versionMatch.Value, out parsedVersion);
+        }
+
+        private static string FormatReleaseVersion(Version parsedVersion)
+        {
+            if (parsedVersion.Revision >= 0) return parsedVersion.ToString(4);
+            if (parsedVersion.Build >= 0) return parsedVersion.ToString(3);
+            return parsedVersion.ToString(2);
+        }
+
+        private bool ShouldUpdate()
+        {
+            string currentVersion = version.Replace(',', '.');
+            if (TryParseReleaseVersion(currentVersion, out var parsedCurrent) &&
+                TryParseReleaseVersion(newversion, out var parsedNew))
+            {
+                return parsedCurrent < parsedNew;
+            }
+
+            return currentVersion.CompareTo(newversion) != 0;
+        }
+
+        private void SetNewVersion(string versionText)
+        {
+            string trimmedVersion = versionText.Trim();
+            newversionTag = trimmedVersion.StartsWith("v", StringComparison.OrdinalIgnoreCase) ?
+                trimmedVersion : $"v{trimmedVersion}";
+            newversion = TryParseReleaseVersion(trimmedVersion, out var parsedVersion) ?
+                FormatReleaseVersion(parsedVersion) : trimmedVersion.TrimStart('v', 'V');
+            newversionDownloadUri = BuildDS4WindowsDownloadUri();
+        }
+
+        private Uri BuildDS4WindowsDownloadUri()
+        {
+            string releaseTag = string.IsNullOrWhiteSpace(newversionTag) ? $"v{newversion}" : newversionTag;
+            return new Uri($"{DS4WINDOWS_RELEASE_DOWNLOAD_BASE_URI}/{Uri.EscapeDataString(releaseTag)}/DS4Windows_{newversion}_{arch}.zip");
+        }
+
+        private GitHubReleaseAsset FindReleaseAsset(GitHubRelease release, string versionText)
+        {
+            if (release.assets == null) return null;
+
+            string expectedName = $"DS4Windows_{versionText}_{arch}.zip";
+            return release.assets.FirstOrDefault(asset =>
+                       asset.name.Equals(expectedName, StringComparison.OrdinalIgnoreCase)) ??
+                   release.assets.FirstOrDefault(asset =>
+                       asset.name.StartsWith("DS4Windows_", StringComparison.OrdinalIgnoreCase) &&
+                       asset.name.EndsWith($"_{arch}.zip", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private bool TrySelectLatestRelease(GitHubRelease[] releases)
+        {
+            GitHubRelease latestRelease = null;
+            GitHubReleaseAsset latestAsset = null;
+            Version latestVersion = new Version(0, 0, 0);
+
+            foreach (var release in releases ?? Array.Empty<GitHubRelease>())
+            {
+                if (!TryParseReleaseVersion(release.tag_name, out var parsedVersion)) continue;
+
+                if (parsedVersion > latestVersion)
+                {
+                    string versionText = FormatReleaseVersion(parsedVersion);
+                    latestVersion = parsedVersion;
+                    latestRelease = release;
+                    latestAsset = FindReleaseAsset(release, versionText);
+                }
+            }
+
+            if (latestRelease == null) return false;
+
+            newversion = FormatReleaseVersion(latestVersion);
+            newversionTag = latestRelease.tag_name;
+            newversionDownloadUri = !string.IsNullOrWhiteSpace(latestAsset?.browser_download_url) ?
+                new Uri(latestAsset.browser_download_url) : BuildDS4WindowsDownloadUri();
+            return true;
+        }
 
         [DllImport("Shell32.dll")]
         private static extern int SHGetKnownFolderPath(
@@ -125,25 +214,22 @@ namespace DS4Updater
 
                 if (File.Exists(path + "\\version.txt"))
                 {
-                    newversion = File.ReadAllText(path + "\\version.txt");
-                    newversion = newversion.Trim();
+                    SetNewVersion(File.ReadAllText(path + "\\version.txt"));
                 }
                 else if (File.Exists(exepath + "\\version.txt"))
                 {
-                    newversion = File.ReadAllText(exepath + "\\version.txt");
-                    newversion = newversion.Trim();
+                    SetNewVersion(File.ReadAllText(exepath + "\\version.txt"));
                 }
                 else
                 {
                     StartVersionFileDownload();
                 }
 
-                if (!downloading && version.Replace(',', '.').CompareTo(newversion) != 0)
+                if (!downloading && ShouldUpdate())
                 {
-                    Uri url = new Uri($"https://github.com/schmaldeo/DS4Windows/releases/download/v{newversion}/DS4Windows_{newversion}_{arch}.zip");
                     sw.Start();
                     outputUpdatePath = Path.Combine(updatesFolder, $"DS4Windows_{newversion}_{arch}.zip");
-                    StartAppArchiveDownload(url, outputUpdatePath);
+                    StartAppArchiveDownload(newversionDownloadUri, outputUpdatePath);
                 }
                 else if (!downloading)
                 {
@@ -216,7 +302,13 @@ namespace DS4Updater
                         label1.Content = "Could not download update";
                     });
                 }
-                catch (Exception e) { label1.Content = e.Message; }
+                catch (Exception e)
+                {
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        label1.Content = e.Message;
+                    });
+                }
                 //wc.DownloadFileCompleted += wc_DownloadFileCompleted;
                 //wc.DownloadProgressChanged += wc_DownloadProgressChanged;
             });
@@ -224,8 +316,7 @@ namespace DS4Updater
 
         private void StartVersionFileDownload()
         {
-            Uri urlv = new Uri("https://api.github.com/repos/schmaldeo/DS4Windows/releases/latest");
-            //Sorry other devs, gonna have to find your own server
+            Uri urlv = new Uri(DS4WINDOWS_RELEASES_API_URI);
             downloading = true;
 
             label1.Content = "Getting Update info";
@@ -240,11 +331,20 @@ namespace DS4Updater
 
                     if (success)
                     {
-                        var gitHubRelease = await response.Content.ReadFromJsonAsync<GitHubRelease>();
+                        var gitHubReleases = await response.Content.ReadFromJsonAsync<GitHubRelease[]>();
+                        if (!TrySelectLatestRelease(gitHubReleases))
+                        {
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                label1.Content = "Could not download update";
+                            });
+                            return;
+                        }
+
                         string verPath = Path.Combine(exepath, "version.txt");
                         using (StreamWriter sw = new(verPath, false))
                         {
-                            sw.Write(gitHubRelease.tag_name.Substring(1));
+                            sw.Write(newversion);
                         }
 
                         subwc_DownloadFileCompleted();
@@ -267,17 +367,32 @@ namespace DS4Updater
                         label1.Content = "Could not download update";
                     });
                 }
+                catch (Exception e)
+                {
+                    Console.WriteLine(e);
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        label1.Content = "Could not download update";
+                    });
+                }
             });
         }
 
         private void subwc_DownloadFileCompleted()
         {
-            newversion = File.ReadAllText(Path.Combine(exepath, "version.txt"));
-            newversion = newversion.Trim();
-            File.Delete(Path.Combine(exepath, "version.txt"));
-            if (version.Replace(',', '.').CompareTo(newversion) != 0)
+            string versionFileValue = File.ReadAllText(Path.Combine(exepath, "version.txt"));
+            if (newversionDownloadUri == null)
             {
-                Uri url = new Uri($"https://github.com/schmaldeo/DS4Windows/releases/download/v{newversion}/DS4Windows_{newversion}_{arch}.zip");
+                SetNewVersion(versionFileValue);
+            }
+            else
+            {
+                newversion = versionFileValue.Trim();
+            }
+
+            File.Delete(Path.Combine(exepath, "version.txt"));
+            if (ShouldUpdate())
+            {
                 sw.Start();
                 outputUpdatePath = Path.Combine(updatesFolder, $"DS4Windows_{newversion}_{arch}.zip");
 
@@ -291,7 +406,7 @@ namespace DS4Updater
                         using (var downloadStream = new FileStream(outputUpdatePath, FileMode.CreateNew))
                         {
                             using HttpResponseMessage response =
-                                await wc.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                                await wc.GetAsync(newversionDownloadUri, HttpCompletionOption.ResponseHeadersRead);
                             long contentLen = response.Content.Headers.ContentLength ?? 0;
                             using (var contentStream = await response.Content.ReadAsStreamAsync())
                             {
@@ -651,8 +766,6 @@ namespace DS4Updater
             }
             else if (!backup)
             {
-                Uri url = new Uri($"https://github.com/schmaldeo/DS4Windows/releases/download/v{newversion}/DS4Windows_{newversion}_{arch}.zip");
-
                 sw.Start();
                 outputUpdatePath = Path.Combine(updatesFolder, $"DS4Windows_{newversion}_{arch}.zip");
                 try
@@ -660,7 +773,7 @@ namespace DS4Updater
                     bool success = false;
                     using (var downloadStream = new FileStream(outputUpdatePath, FileMode.CreateNew))
                     {
-                        using HttpResponseMessage response = await wc.GetAsync(url);
+                        using HttpResponseMessage response = await wc.GetAsync(newversionDownloadUri);
                         response.EnsureSuccessStatusCode();
                         success = response.IsSuccessStatusCode;
                         if (success)
