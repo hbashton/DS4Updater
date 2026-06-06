@@ -32,7 +32,7 @@ jobs:
         run: dotnet restore .\Updater2\DS4Updater.csproj
 
       - name: Build ${{ matrix.platform }}
-        run: dotnet publish .\Updater2\DS4Updater.csproj -c Release /p:platform=${{ matrix.platform }} -o .\bin\${{ matrix.platform }}\Release\output
+        run: dotnet publish .\Updater2\DS4Updater.csproj -c Release -r win-${{ matrix.platform }} --self-contained true /p:Platform=${{ matrix.platform }} /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:EnableCompressionInSingleFile=true -o .\bin\${{ matrix.platform }}\Release\output
 
       - name: Prepare release asset
         shell: pwsh
