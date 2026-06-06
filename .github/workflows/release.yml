@@ -1,0 +1,55 @@
+name: .NET Release
+
+on:
+  push:
+    branches: [ "**" ]
+    tags-ignore: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ x64, x86 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore .\Updater2\DS4Updater.csproj
+
+      - name: Build ${{ matrix.platform }}
+        run: dotnet publish .\Updater2\DS4Updater.csproj -c Release /p:platform=${{ matrix.platform }} -o .\bin\${{ matrix.platform }}\Release\output
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $assetName = if ("${{ matrix.platform }}" -eq "x64") { "DS4Updater.exe" } else { "DS4Updater_x86.exe" }
+          Copy-Item ".\bin\${{ matrix.platform }}\Release\output\DS4Updater.exe" ".\bin\${{ matrix.platform }}\Release\$assetName"
+          "ASSET_NAME=$assetName" >> $env:GITHUB_ENV
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: .\bin\${{ matrix.platform }}\Release\${{ env.ASSET_NAME }}
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        run: gh release upload ${{ github.event.release.tag_name }} .\bin\${{ matrix.platform }}\Release\${{ env.ASSET_NAME }} --clobber
+        env:
+          GITHUB_TOKEN: ${{ github.TOKEN }}
