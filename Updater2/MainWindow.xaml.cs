@@ -635,12 +635,11 @@ namespace DS4Updater
                 string libsPath = Path.Combine(exepath, "libs");
                 string oldLibsPath = Path.Combine(exepath, "oldlibs");
 
-                // Grab relative file paths to DLL files in the current install
-                string[] oldDLLFiles = Directory.GetDirectories(exepath, "*.dll", SearchOption.AllDirectories);
-                for (int i = oldDLLFiles.Length - 1; i >= 0; i--)
-                {
-                    oldDLLFiles[i] = oldDLLFiles[i].Replace($"{exepath}", "");
-                }
+                // Keep an explicit record of files owned by the installed package.
+                // Older releases did not write a manifest, so migrate their known
+                // package directories and root dependencies on this first update.
+                var previouslyManagedFiles = ManagedInstallCleanup.ReadInstalledManifest(exepath);
+                previouslyManagedFiles.UnionWith(ManagedInstallCleanup.FindLegacyManagedFiles(exepath));
 
                 try
                 {
@@ -703,10 +702,13 @@ namespace DS4Updater
                 // Add small sleep timer here as a pre-caution
                 Thread.Sleep(20);
 
-                string[] directories = Directory.GetDirectories(exepath + "\\Update Files\\DS4Windows", "*", SearchOption.AllDirectories);
+                string extractedPackagePath = Path.Combine(exepath, "Update Files", "DS4Windows");
+                var newManagedFiles = ManagedInstallCleanup.EnumeratePackageFiles(extractedPackagePath);
+
+                string[] directories = Directory.GetDirectories(extractedPackagePath, "*", SearchOption.AllDirectories);
                 for (int i = directories.Length - 1; i >= 0; i--)
                 {
-                    string relativePath = directories[i].Replace($"{exepath}\\Update Files\\DS4Windows\\", "");
+                    string relativePath = Path.GetRelativePath(extractedPackagePath, directories[i]);
                     string tempDestPath = Path.Combine(exepath, relativePath);
                     if (!Directory.Exists(tempDestPath))
                     {
@@ -714,19 +716,12 @@ namespace DS4Updater
                     }
                 }
 
-                // Grab relative file paths to DLL files in the newer install
-                string[] newDLLFiles = Directory.GetFiles(exepath + "\\Update Files\\DS4Windows", "*.dll", SearchOption.AllDirectories);
-                for (int i = newDLLFiles.Length - 1; i >= 0; i--)
-                {
-                    newDLLFiles[i] = newDLLFiles[i].Replace($"{exepath}\\Update Files\\DS4Windows\\", "");
-                }
-
-                string[] files = Directory.GetFiles(exepath + "\\Update Files\\DS4Windows", "*", SearchOption.AllDirectories);
+                string[] files = Directory.GetFiles(extractedPackagePath, "*", SearchOption.AllDirectories);
                 for (int i = files.Length - 1; i >= 0; i--)
                 {
                     if (Path.GetFileNameWithoutExtension(files[i]) != "DS4Updater")
                     {
-                        string relativePath = files[i].Replace($"{exepath}\\Update Files\\DS4Windows\\", "");
+                        string relativePath = Path.GetRelativePath(extractedPackagePath, files[i]);
                         string tempDestPath = Path.Combine(exepath, relativePath);
                         //string tempDestPath = $"{exepath}\\{Path.GetFileName(files[i])}";
                         if (File.Exists(tempDestPath))
@@ -744,14 +739,25 @@ namespace DS4Updater
                     Directory.Delete(oldLibsPath, true);
                 }
 
-                // Remove unused DLLs (in main app folder) from previous install
-                string[] excludedDLLs = oldDLLFiles.Except(newDLLFiles).ToArray();
-                foreach (string dllFile in excludedDLLs)
+                // Remove files that belonged to an older package but are absent
+                // from this one. This includes the retired ViGEm client. The
+                // cleanup helper confines every path to the install directory and
+                // never scans profile, settings, plugin, or other user folders.
+                var cleanupFailures = ManagedInstallCleanup.DeleteObsoleteFiles(
+                    exepath,
+                    previouslyManagedFiles,
+                    newManagedFiles);
+                ManagedInstallCleanup.WriteInstalledManifest(exepath, newManagedFiles);
+
+                if (cleanupFailures.Count > 0)
                 {
-                    if (File.Exists(dllFile))
-                    {
-                        File.Delete(dllFile);
-                    }
+                    MessageBox.Show(
+                        "DS4Windows was updated, but a few obsolete files could not be removed. " +
+                        "Close any program using this installation and run the updater again.\n\n" +
+                        string.Join("\n", cleanupFailures),
+                        "Obsolete file cleanup incomplete",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
                 }
 
                 bool appExists = File.Exists(exepath + "\\DS4Windows.exe") ||
