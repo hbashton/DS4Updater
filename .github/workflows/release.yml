@@ -14,7 +14,21 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Test release selection
+        run: dotnet test .\Updater2.Tests\DS4Updater.Tests.csproj -c Release
+
   build:
+    needs: test
     runs-on: windows-latest
     strategy:
       fail-fast: false

@@ -43,22 +43,27 @@ namespace DS4Updater
         {
             RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
 
-            mwd = new MainWindow();
             launchExePath = Path.Combine(exedirpath, "DS4Windows.exe");
+            bool autoLaunch = false;
+            bool forceUserLaunch = false;
+            string requestedReleaseTag = null;
             for (int i=0, arlen = e.Args.Length; i < arlen; i++)
             {
                 string temp = e.Args[i];
-                if (temp.Contains("-skipLang"))
+                if (temp.Equals("-autolaunch"))
                 {
-                    mwd.downloadLang = false;
-                }
-                else if (temp.Equals("-autolaunch"))
-                {
-                    mwd.autoLaunchDS4W = true;
+                    autoLaunch = true;
                 }
                 else if (temp.Equals("-user"))
                 {
-                    mwd.forceLaunchDS4WUser = true;
+                    forceUserLaunch = true;
+                }
+                else if (temp.Equals("--releaseTag", StringComparison.OrdinalIgnoreCase))
+                {
+                    if ((i + 1) < arlen)
+                    {
+                        requestedReleaseTag = e.Args[++i];
+                    }
                 }
                 else if (temp.Equals("--launchExe"))
                 {
@@ -76,6 +81,11 @@ namespace DS4Updater
                 }
             }
 
+            mwd = new MainWindow(requestedReleaseTag)
+            {
+                autoLaunchDS4W = autoLaunch,
+                forceLaunchDS4WUser = forceUserLaunch,
+            };
             mwd.Show();
         }
 
