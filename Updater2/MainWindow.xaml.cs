@@ -83,11 +83,14 @@ namespace DS4Updater
         {
             if (selectedRelease is not null)
             {
+                string installedReleaseTag = ReadInstalledReleaseTag();
                 return ReleaseChannelPolicy.ShouldUpdate(
                     selectedRelease,
                     version,
-                    ReleaseChannelPolicy.IsPrereleaseBuild(currentProductVersion),
-                    ReadInstalledReleaseTag());
+                    ReleaseChannelPolicy.IsPrereleaseInstall(
+                        currentProductVersion,
+                        installedReleaseTag),
+                    installedReleaseTag);
             }
 
             string currentVersion = version.Replace(',', '.');
@@ -162,10 +165,14 @@ namespace DS4Updater
         private bool TrySelectLatestRelease(GitHubRelease[] releases)
         {
             GitHubRelease[] availableReleases = releases ?? Array.Empty<GitHubRelease>();
+            string installedReleaseTag = ReadInstalledReleaseTag();
+            bool currentBuildIsPrerelease = ReleaseChannelPolicy.IsPrereleaseInstall(
+                currentProductVersion,
+                installedReleaseTag);
             GitHubRelease release = string.IsNullOrWhiteSpace(requestedReleaseTag) ?
                 ReleaseChannelPolicy.SelectPreferredRelease(
                     availableReleases,
-                    ReleaseChannelPolicy.IsPrereleaseBuild(currentProductVersion)) :
+                    currentBuildIsPrerelease) :
                 availableReleases.FirstOrDefault(candidate =>
                     string.Equals(candidate.tag_name, requestedReleaseTag,
                         StringComparison.OrdinalIgnoreCase));

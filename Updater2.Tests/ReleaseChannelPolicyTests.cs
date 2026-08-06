@@ -80,6 +80,23 @@ namespace DS4Updater.Tests
                 selected, "4.0.0", false, installedReleaseTag: "v4.1.0"));
         }
 
+        [TestMethod]
+        public void PackagedPrereleaseMarkerKeepsNumericBinaryOnPrereleaseChannel()
+        {
+            Assert.IsTrue(ReleaseChannelPolicy.IsPrereleaseInstall(
+                "5.0.2.0", "VIIPERRC4.2"));
+
+            GitHubRelease selected = ReleaseChannelPolicy.SelectPreferredRelease(
+                new[]
+                {
+                    Release("v5.0.1", false, "2026-08-05T00:00:00Z"),
+                    Release("VIIPERRC4.2", true, "2026-08-06T00:00:00Z"),
+                },
+                currentBuildIsPrerelease: true);
+
+            Assert.AreEqual("VIIPERRC4.2", selected.tag_name);
+        }
+
         private static GitHubRelease Release(
             string tag,
             bool prerelease,
