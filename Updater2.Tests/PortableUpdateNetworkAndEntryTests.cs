@@ -88,6 +88,49 @@ public sealed class PortableUpdateNetworkAndEntryTests
     }
 
     [TestMethod]
+    public async Task BuildReceiptBodyHasADeadlineAndNeverWritesThePackageArchive()
+    {
+        using var folder = new FixtureFolder();
+        using var operations = new PortableUpdateOperations(folder.Path, null,
+            new ResponseHandler(() => new StreamContent(new StalledStream())), TimeSpan.FromMilliseconds(100));
+        await ExpectCancellation(() => operations.DownloadBuildReceiptAsync(Asset(100), CancellationToken.None));
+        Assert.AreEqual(0, Directory.GetFiles(folder.Path).Length);
+    }
+
+    [TestMethod]
+    public async Task BuildReceiptIsMemoryBoundedAndRetainsNoPackageFile()
+    {
+        using var folder = new FixtureFolder();
+        byte[] bytes = Encoding.UTF8.GetBytes("synthetic receipt");
+        using var operations = new PortableUpdateOperations(folder.Path, null,
+            new ResponseHandler(() => new ByteArrayContent(bytes)));
+        CollectionAssert.AreEqual(bytes, await operations.DownloadBuildReceiptAsync(Asset(bytes.Length), CancellationToken.None));
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+            operations.DownloadBuildReceiptAsync(Asset(bytes.Length + 1), CancellationToken.None));
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+            operations.DownloadBuildReceiptAsync(Asset(PortableReleaseResolver.MaximumReceiptBytes + 1), CancellationToken.None));
+        Assert.AreEqual(0, Directory.GetFiles(folder.Path).Length);
+    }
+
+    [TestMethod]
+    public void LegacyPreCopyArchiveCheckRequiresBothPublishedSizeAndDigest()
+    {
+        using var folder = new FixtureFolder();
+        string path = Path.Combine(folder.Path, "synthetic-package.zip");
+        byte[] bytes = Encoding.UTF8.GetBytes("synthetic package, never executed");
+        File.WriteAllBytes(path, bytes);
+        var asset = Asset(bytes.Length) with { digest = "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)) };
+        var identity = new PortableReleaseIdentity("VIIPERRC4.6", new Version(9, 2, 3, 4), asset, true);
+        identity.VerifyArchive(path);
+        Assert.ThrowsException<InvalidDataException>(() =>
+            (identity with { Asset = asset with { size = bytes.Length + 1 } }).VerifyArchive(path));
+        Assert.ThrowsException<InvalidDataException>(() =>
+            (identity with { Asset = asset with { digest = "sha256:" + new string('b', 64) } }).VerifyArchive(path));
+        File.WriteAllBytes(path, new byte[bytes.Length]);
+        Assert.ThrowsException<InvalidDataException>(() => identity.VerifyArchive(path));
+    }
+
+    [TestMethod]
     public async Task CallerCancellationStillStopsTheResponseBody()
     {
         using var folder = new FixtureFolder();

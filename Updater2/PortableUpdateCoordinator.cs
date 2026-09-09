@@ -24,6 +24,7 @@ internal interface IPortableUpdateOperations
     string ValidateRoot(string target);
     PortableInstalledIdentity ReadIdentity(string root, string launchExe);
     Task<GitHubRelease> FetchReleaseAsync(string exactTag, CancellationToken cancellation);
+    Task<byte[]> DownloadBuildReceiptAsync(GitHubReleaseAsset asset, CancellationToken cancellation);
     Task<string> DownloadAsync(GitHubReleaseAsset asset, CancellationToken cancellation);
     IPortablePreparedPackage Prepare(string target, string archive, string digest, string tag);
     Task WaitForQuiescenceAsync(PortableUpdateRequest request, CancellationToken cancellation);
@@ -31,7 +32,7 @@ internal interface IPortableUpdateOperations
 
 internal static class PortableUpdateCoordinator
 {
-    internal static async Task ExecuteAsync(PortableUpdateRequest request, IPortableUpdateOperations operations,
+    internal static async Task<PortableReleaseIdentity> ExecuteAsync(PortableUpdateRequest request, IPortableUpdateOperations operations,
         IProgress<PortableUpdateProgress> progress, CancellationToken cancellation)
     {
         if (!request.IsWorker) throw new InvalidOperationException("Only the isolated worker can apply a portable update.");
@@ -44,41 +45,49 @@ internal static class PortableUpdateCoordinator
         GitHubRelease release = await operations.FetchReleaseAsync(request.ReleaseTag, cancellation).ConfigureAwait(false);
         if (release == null || release.draft || !string.Equals(release.tag_name, request.ReleaseTag, StringComparison.Ordinal) ||
             !ReleaseChannelPolicy.ShouldUpdate(release, installed.FileVersion,
-                ReleaseChannelPolicy.IsPrereleaseInstall(installed.ProductVersion, installed.ReleaseTag), installed.ReleaseTag) ||
-            !IsNonDowngradingBinary(release.tag_name, installed.FileVersion))
+                ReleaseChannelPolicy.IsPrereleaseInstall(installed.ProductVersion, installed.ReleaseTag), installed.ReleaseTag))
             throw new InvalidDataException("The requested release is not a verified forward update for this portable copy.");
-        GitHubReleaseAsset asset = ReleaseChannelPolicy.SelectPortableAsset(release, "x64");
-        if (asset == null || !ReleaseChannelPolicy.TryGetAssetSha256(asset, out string digest) ||
-            asset.size.GetValueOrDefault() > 2L * 1024 * 1024 * 1024)
-            throw new InvalidDataException("The release does not have one supported x64 portable ZIP with a GitHub SHA-256 digest.");
+        PortableReleaseIdentity resolved = await ResolveReleaseAsync(release, "x64", operations, cancellation).ConfigureAwait(false);
+        if (!resolved.IsNonDowngradingBinary(installed.FileVersion))
+            throw new InvalidDataException("The requested release would downgrade the installed Windows binaries.");
+        GitHubReleaseAsset asset = resolved.Asset;
+        ReleaseChannelPolicy.TryGetAssetSha256(asset, out string digest);
         progress?.Report(new("Downloading the verified portable package…"));
         string archive = await operations.DownloadAsync(asset, cancellation).ConfigureAwait(false);
         cancellation.ThrowIfCancellationRequested();
         progress?.Report(new("Verifying and staging every packaged file…"));
-        using IPortablePreparedPackage package = operations.Prepare(target, archive, digest, release.tag_name);
+        using IPortablePreparedPackage package = operations.Prepare(target, archive, digest, resolved.PackageTag);
         PortableInstalledIdentity staged = operations.ReadIdentity(package.StagedRoot, "DS4Windows.exe");
-        if (!ReleaseChannelPolicy.VerifyInstalledIdentity(release.tag_name, staged.FileVersion, staged.ProductVersion, staged.ReleaseTag))
+        if (!resolved.VerifyInstalled(staged))
             throw new InvalidDataException("The staged Windows binaries do not match the selected release identity.");
         progress?.Report(new("Waiting for this portable DS4Windows and VIIPER to close…"));
         await operations.WaitForQuiescenceAsync(request, cancellation).ConfigureAwait(false);
         cancellation.ThrowIfCancellationRequested();
         if (!string.Equals(operations.ValidateRoot(target), target, StringComparison.OrdinalIgnoreCase))
             throw new IOException("The portable root changed before installation.");
+        if (operations.ReadIdentity(target, request.LaunchExe) != installed)
+            throw new IOException("The installed application identity changed while the update was prepared. Retry the update.");
         cancellation.ThrowIfCancellationRequested();
         // From here ordinary failures are handled by the file transaction's
         // rollback, not by abandoning a background task on cancellation.
         progress?.Report(new("Installing verified files. Please keep this window open…", Applying: true));
         package.Apply(request.CustomExeBaseName);
         PortableInstalledIdentity final = operations.ReadIdentity(target, request.LaunchExe);
-        if (!ReleaseChannelPolicy.VerifyInstalledIdentity(release.tag_name, final.FileVersion, final.ProductVersion, final.ReleaseTag))
+        if (!resolved.VerifyInstalled(final))
             throw new IOException("The installed identity could not be confirmed. Do not launch DS4Windows until the update folder is inspected.");
         progress?.Report(new("Portable DS4Windows was updated successfully."));
+        return resolved;
     }
 
-    private static bool IsNonDowngradingBinary(string selectedTag, string installedFileVersion) =>
-        ReleaseChannelPolicy.TryGetExpectedFileVersion(selectedTag, out Version expected) &&
-        Version.TryParse(installedFileVersion, out Version installed) &&
-        expected >= new Version(installed.Major, installed.Minor, Math.Max(0, installed.Build), Math.Max(0, installed.Revision));
+    internal static async Task<PortableReleaseIdentity> ResolveReleaseAsync(GitHubRelease release, string architecture,
+        IPortableUpdateOperations operations, CancellationToken cancellation)
+    {
+        GitHubReleaseAsset receipt = PortableReleaseResolver.SelectBuildReceipt(release);
+        byte[] bytes = receipt == null ? null :
+            await operations.DownloadBuildReceiptAsync(receipt, cancellation).ConfigureAwait(false);
+        cancellation.ThrowIfCancellationRequested();
+        return PortableReleaseResolver.Resolve(release, architecture, bytes);
+    }
 }
 
 internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDisposable
@@ -98,7 +107,7 @@ internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDis
             throw new ArgumentOutOfRangeException(nameof(transferTimeout));
         client = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false })
             { Timeout = TimeSpan.FromSeconds(45) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("DS4Windows-Portable-Updater/2.0.5");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("DS4Windows-Portable-Updater/2.0.6");
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
     }
 
@@ -180,6 +189,36 @@ internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDis
             return archive;
         }
         throw new HttpRequestException("The release download exceeded its redirect limit.");
+    }
+
+    public async Task<byte[]> DownloadBuildReceiptAsync(GitHubReleaseAsset asset, CancellationToken cancellation)
+    {
+        if (asset is null || asset.size.GetValueOrDefault() <= 0 || asset.size > PortableReleaseResolver.MaximumReceiptBytes)
+            throw new InvalidDataException("The build record exceeds its approved size.");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        deadline.CancelAfter(transferTimeout < TimeSpan.FromSeconds(45) ? transferTimeout : TimeSpan.FromSeconds(45));
+        cancellation = deadline.Token;
+        Uri current = new(asset.browser_download_url);
+        for (int redirects = 0; redirects <= 5; redirects++)
+        {
+            ValidateDownloadUri(current);
+            using HttpResponseMessage response = await client.GetAsync(current, HttpCompletionOption.ResponseHeadersRead, cancellation).ConfigureAwait(false);
+            if (response.StatusCode is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or HttpStatusCode.SeeOther or
+                HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect)
+            {
+                Uri location = response.Headers.Location ?? throw new HttpRequestException("The build record redirect is missing.");
+                current = location.IsAbsoluteUri ? location : new Uri(current, location);
+                continue;
+            }
+            response.EnsureSuccessStatusCode();
+            if (response.Content.Headers.ContentLength.HasValue && response.Content.Headers.ContentLength != asset.size)
+                throw new InvalidDataException("The build record length does not match GitHub metadata.");
+            using Stream input = await response.Content.ReadAsStreamAsync(cancellation).ConfigureAwait(false);
+            using var output = new MemoryStream();
+            await CopyBoundedAsync(input, output, PortableReleaseResolver.MaximumReceiptBytes, asset.size.Value, cancellation).ConfigureAwait(false);
+            return output.ToArray();
+        }
+        throw new HttpRequestException("The build record download exceeded its redirect limit.");
     }
 
     internal static void ValidateDownloadUri(Uri uri)

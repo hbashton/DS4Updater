@@ -176,8 +176,14 @@ namespace DS4Updater
 
         internal static GitHubReleaseAsset SelectPortableAsset(GitHubRelease release, string architecture)
         {
-            if (release is null || release.draft ||
-                !TryGetExpectedFileVersion(release.tag_name, out Version expectedVersion) ||
+            return TryGetExpectedFileVersion(release?.tag_name, out Version expectedVersion) ?
+                SelectPortableAsset(release, architecture, expectedVersion) : null;
+        }
+
+        internal static GitHubReleaseAsset SelectPortableAsset(GitHubRelease release, string architecture,
+            Version expectedVersion)
+        {
+            if (release is null || release.draft || expectedVersion is null ||
                 (architecture != "x64" && architecture != "x86")) return null;
 
             string[] names =
@@ -210,7 +216,7 @@ namespace DS4Updater
             return true;
         }
 
-        private static bool HasExactReleaseAssetUrl(string tag, GitHubReleaseAsset asset)
+        internal static bool HasExactReleaseAssetUrl(string tag, GitHubReleaseAsset asset)
         {
             return Uri.TryCreate(asset.browser_download_url, UriKind.Absolute, out Uri uri) &&
                 uri.Scheme == Uri.UriSchemeHttps && uri.IsDefaultPort &&
@@ -224,8 +230,14 @@ namespace DS4Updater
         internal static bool VerifyInstalledIdentity(string tag, string fileVersion,
             string productVersion, string installedReleaseTag)
         {
-            if (!TryGetExpectedFileVersion(tag, out Version expected) ||
-                !Version.TryParse(fileVersion?.Trim(), out Version actual) ||
+            return TryGetExpectedFileVersion(tag, out Version expected) &&
+                VerifyInstalledIdentity(tag, fileVersion, productVersion, installedReleaseTag, expected);
+        }
+
+        internal static bool VerifyInstalledIdentity(string tag, string fileVersion,
+            string productVersion, string installedReleaseTag, Version expected)
+        {
+            if (expected is null || !Version.TryParse(fileVersion?.Trim(), out Version actual) ||
                 NormalizeVersion(actual) != expected) return false;
 
             if (!string.IsNullOrWhiteSpace(installedReleaseTag) &&
@@ -257,6 +269,12 @@ namespace DS4Updater
             };
             return version is not null || TryParseNumericReleaseTag(tag, out version);
         }
+
+        internal static bool IsSupportedReleaseTag(string tag) =>
+            !string.IsNullOrWhiteSpace(tag) && tag == tag.Trim() &&
+            (TryParseNumericReleaseTag(tag, out _) || TryParseViiperPrereleaseTag(tag, out _, out _));
+
+        internal static bool IsNumericReleaseTag(string tag) => TryParseNumericReleaseTag(tag, out _);
 
         private static Version NormalizeVersion(Version version) => new(
             version.Major, version.Minor, Math.Max(0, version.Build), Math.Max(0, version.Revision));

@@ -62,6 +62,8 @@ public sealed class PortableReleasePolicyTests
     }
 
     [DataTestMethod]
+    [DataRow("VIIPERRC4.5.4")]
+    [DataRow("VIIPERRC4.5.3.1")]
     [DataRow("VIIPERRC4.6")]
     [DataRow("VIIPERRC4.5.1-hotfix")]
     [DataRow("VIIPERBeta99")]
@@ -69,8 +71,11 @@ public sealed class PortableReleasePolicyTests
     [DataRow("prefix-5.0.5.1")]
     [DataRow("v5.0.5.1 garbage")]
     [DataRow(null)]
-    public void UnknownIdentityIsRejectedInsteadOfGuessingWindowsVersion(string tag) =>
+    public void UnknownIdentityIsRejectedInsteadOfGuessingWindowsVersion(string tag)
+    {
+        Assert.IsFalse(ReleaseChannelPolicy.TryGetExpectedFileVersion(tag, out _));
         Assert.IsFalse(ReleaseChannelPolicy.VerifyInstalledIdentity(tag, "5.0.5.1", tag, tag));
+    }
 
     [TestMethod]
     public void NumericVersionsNormalizeMissingZeroComponentsButRetainExactReleaseMarker()

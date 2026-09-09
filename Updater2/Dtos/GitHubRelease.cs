@@ -9,7 +9,8 @@ namespace DS4Updater.Dtos
         bool draft,
         DateTimeOffset? published_at,
         DateTimeOffset? created_at,
-        GitHubReleaseAsset[] assets);
+        GitHubReleaseAsset[] assets,
+        long? id = null);
 
     public record GitHubReleaseAsset(string name, string browser_download_url,
         long? size = null, string digest = null);

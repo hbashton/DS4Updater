@@ -21,6 +21,7 @@ internal sealed class PortableUpdateWindow : Window
     private readonly Button closeButton, openButton;
     private readonly ProgressBar progress;
     private bool busy = true, applying, successful;
+    private PortableReleaseIdentity verifiedRelease;
 
     internal PortableUpdateWindow(PortableUpdateRequest request, PortableWorkerRecord worker)
     {
@@ -74,7 +75,7 @@ internal sealed class PortableUpdateWindow : Window
         {
             string directory = Path.GetDirectoryName(Environment.ProcessPath);
             using var operations = new PortableUpdateOperations(directory, worker);
-            await Task.Run(() => PortableUpdateCoordinator.ExecuteAsync(request, operations, reporting, cancellation.Token));
+            verifiedRelease = await Task.Run(() => PortableUpdateCoordinator.ExecuteAsync(request, operations, reporting, cancellation.Token));
             successful = true;
             status.Text = "Update complete. Your portable copy is ready.";
             openButton.Visibility = Visibility.Visible;
@@ -132,7 +133,7 @@ internal sealed class PortableUpdateWindow : Window
             PortableWorkerSession.ValidateLaunchConfiguration(request);
             using var operations = new PortableUpdateOperations(Path.GetDirectoryName(Environment.ProcessPath), worker);
             PortableInstalledIdentity identity = operations.ReadIdentity(request.TargetDirectory, request.LaunchExe);
-            if (!ReleaseChannelPolicy.VerifyInstalledIdentity(request.ReleaseTag, identity.FileVersion, identity.ProductVersion, identity.ReleaseTag))
+            if (verifiedRelease is null || !verifiedRelease.VerifyInstalled(identity))
                 throw new IOException("The updated application identity changed. Nothing was launched.");
             using Process process = Process.Start(new ProcessStartInfo(Path.Combine(request.TargetDirectory, request.LaunchExe))
             { UseShellExecute = true, WorkingDirectory = request.TargetDirectory }) ?? throw new IOException("DS4Windows could not be launched.");

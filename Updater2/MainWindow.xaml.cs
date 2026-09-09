@@ -54,6 +54,7 @@ namespace DS4Updater
         string newversionTag = "";
         Uri newversionDownloadUri = null;
         GitHubRelease selectedRelease = null;
+        PortableReleaseIdentity verifiedRelease = null;
         readonly string requestedReleaseTag;
         bool downloading = false;
         private int round = 1;
@@ -306,6 +307,8 @@ namespace DS4Updater
             {
                 try
                 {
+                    await PrepareVerifiedReleaseAsync().ConfigureAwait(false);
+                    url = newversionDownloadUri;
                     bool success = false;
                     using (var downloadStream = new FileStream(outputUpdatePath, FileMode.Create))
                     {
@@ -367,6 +370,37 @@ namespace DS4Updater
                 //wc.DownloadFileCompleted += wc_DownloadFileCompleted;
                 //wc.DownloadProgressChanged += wc_DownloadProgressChanged;
             });
+        }
+
+        private async Task PrepareVerifiedReleaseAsync()
+        {
+            verifiedRelease = null;
+            string tag = selectedRelease?.tag_name ?? newversionTag;
+            using var operations = new PortableUpdateOperations(updatesFolder, null);
+            GitHubRelease exact = await operations.FetchReleaseAsync(tag, CancellationToken.None).ConfigureAwait(false);
+            string marker = ReadInstalledReleaseTag();
+            if (exact == null || exact.tag_name != tag ||
+                !ReleaseChannelPolicy.ShouldUpdate(exact, version,
+                    ReleaseChannelPolicy.IsPrereleaseInstall(currentProductVersion, marker), marker))
+                throw new InvalidDataException("The requested release is not a verified forward update.");
+            PortableReleaseIdentity resolved = await PortableUpdateCoordinator.ResolveReleaseAsync(
+                exact, arch, operations, CancellationToken.None).ConfigureAwait(false);
+            if (!resolved.IsNonDowngradingBinary(version))
+                throw new InvalidDataException("The requested release would downgrade the installed Windows binaries.");
+            selectedRelease = exact;
+            newversionTag = exact.tag_name;
+            newversionDownloadUri = new Uri(resolved.Asset.browser_download_url);
+            verifiedRelease = resolved;
+        }
+
+        private void ValidateLegacyInstalledVersion()
+        {
+            FileVersionInfo current = FileVersionInfo.GetVersionInfo(Path.Combine(exepath, "DS4Windows.exe"));
+            string marker = ReadInstalledReleaseTag();
+            if (verifiedRelease == null || !verifiedRelease.IsNonDowngradingBinary(current.FileVersion) ||
+                !ReleaseChannelPolicy.ShouldUpdate(selectedRelease, current.FileVersion,
+                    ReleaseChannelPolicy.IsPrereleaseInstall(current.ProductVersion, marker), marker))
+                throw new InvalidDataException("The installed release changed or would be downgraded. Retry the update.");
         }
 
         private void StartVersionFileDownload()
@@ -451,56 +485,7 @@ namespace DS4Updater
                 sw.Start();
                 outputUpdatePath = Path.Combine(updatesFolder, GetArchiveFileName());
 
-                //wc.DownloadFileAsync(url, outputUpdatePath);
-                //Task.Run(async () =>
-                Func<Task> currentTask = async () =>
-                {
-                    try
-                    {
-                        bool success = false;
-                        using (var downloadStream = new FileStream(outputUpdatePath, FileMode.Create))
-                        {
-                            using HttpResponseMessage response =
-                                await wc.GetAsync(newversionDownloadUri, HttpCompletionOption.ResponseHeadersRead);
-                            long contentLen = response.Content.Headers.ContentLength ?? 0;
-                            using (var contentStream = await response.Content.ReadAsStreamAsync())
-                            {
-                                byte[] buffer = new byte[16384];
-                                int bytesRead = 0;
-                                long totalBytesRead = 0;
-                                while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)
-                                           .ConfigureAwait(false)) != 0)
-                                {
-                                    await downloadStream.WriteAsync(buffer, 0, bytesRead).ConfigureAwait(false);
-                                    totalBytesRead += bytesRead;
-                                    Application.Current.Dispatcher.BeginInvoke(() =>
-                                    {
-                                        wc_DownloadProgressChanged(
-                                            new CopyProgress(totalBytesRead, contentLen));
-                                    });
-                                }
-
-                                if (downloadStream.CanSeek) downloadStream.Position = 0;
-                            }
-
-                            success = response.IsSuccessStatusCode;
-                            response.EnsureSuccessStatusCode();
-                        }
-
-                        if (success)
-                        {
-                            Application.Current.Dispatcher.BeginInvoke(() => { wc_DownloadFileCompleted(); });
-                        }
-                    }
-                    catch (Exception ec)
-                    {
-                        Application.Current.Dispatcher.BeginInvoke(() => { label1.Content = ec.Message; });
-                    }
-                    //});
-                };
-                currentTask?.Invoke();
-                //wc.DownloadFileCompleted += wc_DownloadFileCompleted;
-                //wc.DownloadProgressChanged += wc_DownloadProgressChanged;
+                StartAppArchiveDownload(newversionDownloadUri, outputUpdatePath);
             }
             else
             {
@@ -578,6 +563,34 @@ namespace DS4Updater
 
             if (new FileInfo(outputUpdatePath).Length > 0)
             {
+                // Verify before process shutdown or any destructive legacy copy.
+                // Keep the verified ZIP immutable while the legacy path uses it.
+                FileStream archiveGuard;
+                try
+                {
+                    if (verifiedRelease == null)
+                        throw new InvalidDataException("The release identity has not been verified.");
+                    PortablePackageTransaction.ValidateNoReparse(outputUpdatePath);
+                    archiveGuard = new FileStream(outputUpdatePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                }
+                catch (Exception error)
+                {
+                    label1.Content = "Update verification failed: " + error.Message;
+                    btnOpenDS4.IsEnabled = false;
+                    return;
+                }
+                using var lockedArchive = archiveGuard;
+                try
+                {
+                    verifiedRelease.VerifyArchive(outputUpdatePath);
+                    ValidateLegacyInstalledVersion();
+                }
+                catch (Exception error)
+                {
+                    label1.Content = "Update verification failed: " + error.Message;
+                    btnOpenDS4.IsEnabled = false;
+                    return;
+                }
                 Process[] processes = Process.GetProcessesByName("DS4Windows");
                 label1.Content = "Download Complete";
                 if (processes.Length > 0)
@@ -634,6 +647,13 @@ namespace DS4Updater
                     }
                 }
 
+                try { ValidateLegacyInstalledVersion(); }
+                catch (Exception error)
+                {
+                    label1.Content = "Update verification failed: " + error.Message;
+                    btnOpenDS4.IsEnabled = false;
+                    return;
+                }
                 label2.Opacity = 0;
                 label1.Content = "Deleting old files";
                 UpdaterBar.Value = 102;
@@ -766,18 +786,17 @@ namespace DS4Updater
                 string ds4winversion = File.Exists(exepath + "\\DS4Windows.exe") ?
                     FileVersionInfo.GetVersionInfo(exepath + "\\DS4Windows.exe").FileVersion :
                     string.Empty;
-                bool versionMatches = ReleaseChannelPolicy.VerifyInstalledIdentity(
-                    selectedRelease?.tag_name ?? newversion.Trim(), ds4winversion,
+                bool versionMatches = verifiedRelease.VerifyInstalled(new PortableInstalledIdentity(ds4winversion,
                     File.Exists(exepath + "\\DS4Windows.exe") ?
                         FileVersionInfo.GetVersionInfo(exepath + "\\DS4Windows.exe").ProductVersion : null,
-                    ReadInstalledReleaseTag());
+                    ReadInstalledReleaseTag()));
                 if (appExists && versionMatches)
                 {
                     if (selectedRelease is not null)
                     {
                         File.WriteAllText(
                             Path.Combine(exepath, ReleaseChannelPolicy.InstalledReleaseFileName),
-                            selectedRelease.tag_name);
+                            verifiedRelease.PackageTag);
                     }
 
                     //File.Delete(exepath + $"\\DS4Windows_{newversion}_{arch}.zip");
@@ -790,6 +809,12 @@ namespace DS4Updater
                 }
                 else
                     label1.Content = "Could not unpack zip, please manually unzip";
+
+                if (!appExists || !versionMatches)
+                {
+                    btnOpenDS4.IsEnabled = false;
+                    return;
+                }
 
                 // Check for custom exe name setting
                 string custom_exe_name_path = Path.Combine(exepath, CUSTOM_EXE_CONFIG_FILENAME);

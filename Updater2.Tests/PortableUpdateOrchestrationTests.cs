@@ -100,7 +100,7 @@ public sealed class PortableUpdateOrchestrationTests
         var ops = new FakeOperations();
         await PortableUpdateCoordinator.ExecuteAsync(Request(), ops, null, CancellationToken.None);
         CollectionAssert.AreEqual(new[] { "validate", "installed", "fetch", "download", "prepare", "staged",
-            "wait", "validate", "apply", "installed", "dispose" }, ops.Events);
+            "wait", "validate", "installed", "apply", "installed", "dispose" }, ops.Events);
         Assert.IsTrue(ops.Applied);
         Assert.IsNull(ops.AppliedAlias);
     }
@@ -111,6 +111,70 @@ public sealed class PortableUpdateOrchestrationTests
         var ops = new FakeOperations();
         await PortableUpdateCoordinator.ExecuteAsync(Request() with { LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None);
         Assert.AreEqual("Game.Pad", ops.AppliedAlias);
+    }
+
+    [DataTestMethod]
+    [DataRow("5.0.5.1", "VIIPERRC4.5.1", "VIIPERRC4.5.3", "5.0.5.3")]
+    [DataRow("5.0.5.2", "VIIPERRC4.5.2", "VIIPERRC4.5.3", "5.0.5.3")]
+    [DataRow("5.0.5.3", "VIIPERRC4.5.3", "VIIPERRC4.5.4", "5.0.5.4")]
+    [DataRow("5.0.5.3", "VIIPERRC4.5.3", "VIIPERRC4.6", "6.7.8.9")]
+    public async Task VerifiedBuildRecordPreservesTheSafePipelineForFuturePortableReleases(
+        string installedVersion, string installedTag, string tag, string expectedVersion)
+    {
+        var ops = new FakeOperations
+        {
+            Installed = new(installedVersion, installedTag, installedTag),
+            Staged = new(expectedVersion, tag, tag),
+        };
+        ops.SetBuildReceipt(tag, expectedVersion);
+
+        PortableReleaseIdentity resolved = await PortableUpdateCoordinator.ExecuteAsync(Request() with { ReleaseTag = tag },
+            ops, null, CancellationToken.None);
+
+        CollectionAssert.AreEqual(new[] { "validate", "installed", "fetch", "receipt", "download", "prepare", "staged",
+            "wait", "validate", "installed", "apply", "installed", "dispose" }, ops.Events);
+        Assert.IsTrue(ops.Applied);
+        Assert.IsTrue(resolved.VerifyInstalled(ops.Staged), "The Open button retains this resolved identity, not the old tag allowlist.");
+        Assert.IsFalse(resolved.VerifyInstalled(ops.Staged with { FileVersion = installedVersion }));
+    }
+
+    [TestMethod]
+    public async Task ForwardNamedTagCannotUseAReceiptToDowngradeWindowsBinaries()
+    {
+        var ops = new FakeOperations { Installed = new("5.0.5.3", "VIIPERRC4.5.3", "VIIPERRC4.5.3") };
+        ops.SetBuildReceipt("VIIPERRC4.6", "5.0.5.2");
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => PortableUpdateCoordinator.ExecuteAsync(
+            Request() with { ReleaseTag = "VIIPERRC4.6" }, ops, null, CancellationToken.None));
+        Assert.IsFalse(ops.Events.Contains("download"));
+        Assert.IsFalse(ops.Applied);
+    }
+
+    [DataTestMethod]
+    [DataRow("v9.2.3", "9.2.3", "9.2.3.0")]
+    [DataRow("v9.2.3.4-rc1", "9.2.3.4", "9.2.3.4")]
+    public async Task NumericReceiptUsesTheSamePackageMarkerAsTheReleaseWorkflow(
+        string tag, string receiptVersion, string expectedVersion)
+    {
+        string packageTag = tag[1..];
+        var ops = new FakeOperations { Staged = new(expectedVersion, packageTag, packageTag) };
+        ops.SetBuildReceipt(tag, receiptVersion);
+        PortableReleaseIdentity resolved = await PortableUpdateCoordinator.ExecuteAsync(
+            Request() with { ReleaseTag = tag }, ops, null, CancellationToken.None);
+        Assert.AreEqual(packageTag, ops.PreparedTag);
+        Assert.AreEqual(packageTag, resolved.PackageTag);
+        Assert.IsTrue(resolved.VerifyInstalled(ops.Staged));
+        Assert.IsTrue(ops.Applied);
+    }
+
+    [TestMethod]
+    public async Task TargetIdentityChangeDuringQuiescenceCannotOverwriteANewerInstall()
+    {
+        var ops = new FakeOperations();
+        ops.OnWait = () => ops.Installed = new("9.0.0.0", "VIIPERRC5", "VIIPERRC5");
+        await Assert.ThrowsExceptionAsync<IOException>(() =>
+            PortableUpdateCoordinator.ExecuteAsync(Request(), ops, null, CancellationToken.None));
+        Assert.IsFalse(ops.Applied);
+        Assert.AreEqual("dispose", ops.Events.Last());
     }
 
     [DataTestMethod]
@@ -177,7 +241,7 @@ public sealed class PortableUpdateOrchestrationTests
     {
         var ops = new FakeOperations { ApplyFailure = new IOException("rolled back") };
         await Assert.ThrowsExceptionAsync<IOException>(() => PortableUpdateCoordinator.ExecuteAsync(Request(), ops, null, CancellationToken.None));
-        Assert.AreEqual(1, ops.Events.Count(e => e == "installed"));
+        Assert.AreEqual(2, ops.Events.Count(e => e == "installed"));
         Assert.AreEqual("dispose", ops.Events.Last());
     }
 
@@ -229,6 +293,27 @@ public sealed class PortableUpdateOrchestrationTests
         internal string AppliedAlias;
         internal Exception WaitFailure, ApplyFailure;
         internal Action OnWait;
+        internal byte[] ReceiptBytes;
+        internal string PreparedTag;
+        internal void SetBuildReceipt(string tag, string version)
+        {
+            const long releaseId = 123;
+            var zip = Release.assets[0] with
+            {
+                browser_download_url = $"https://github.com/hbashton/DS4Windows/releases/download/{tag}/DS4Windows_VIIPER_x64.zip",
+            };
+            ReceiptBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                schema = 1, repository = "hbashton/DS4Windows", tag, releaseId,
+                binaryVersion = version,
+                assets = new[] { new { name = zip.name, sha256 = new string('a', 64) } },
+            });
+            var receipt = new GitHubReleaseAsset(PortableReleaseResolver.ReceiptName,
+                $"https://github.com/hbashton/DS4Windows/releases/download/{tag}/{PortableReleaseResolver.ReceiptName}",
+                ReceiptBytes.Length, "sha256:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(ReceiptBytes)));
+            Release = Release with { tag_name = tag, prerelease = ReleaseChannelPolicy.IsPrereleaseBuild(tag),
+                id = releaseId, assets = new[] { zip, receipt } };
+        }
         public string StagedRoot => "fake-stage";
         public string ValidateRoot(string target) { Events.Add("validate"); return target; }
         public PortableInstalledIdentity ReadIdentity(string root, string launchExe)
@@ -237,8 +322,11 @@ public sealed class PortableUpdateOrchestrationTests
             return root == StagedRoot || Applied ? Staged : Installed;
         }
         public Task<GitHubRelease> FetchReleaseAsync(string tag, CancellationToken cancellation) { Events.Add("fetch"); return Task.FromResult(Release); }
+        public Task<byte[]> DownloadBuildReceiptAsync(GitHubReleaseAsset asset, CancellationToken cancellation)
+        { Events.Add("receipt"); return Task.FromResult(ReceiptBytes); }
         public Task<string> DownloadAsync(GitHubReleaseAsset asset, CancellationToken cancellation) { Events.Add("download"); return Task.FromResult("fake-archive"); }
-        public IPortablePreparedPackage Prepare(string target, string archive, string digest, string tag) { Events.Add("prepare"); return this; }
+        public IPortablePreparedPackage Prepare(string target, string archive, string digest, string tag)
+        { Events.Add("prepare"); PreparedTag = tag; return this; }
         public Task WaitForQuiescenceAsync(PortableUpdateRequest request, CancellationToken cancellation)
         {
             Events.Add("wait");
