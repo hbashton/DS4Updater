@@ -11,5 +11,6 @@ namespace DS4Updater.Dtos
         DateTimeOffset? created_at,
         GitHubReleaseAsset[] assets);
 
-    public record GitHubReleaseAsset(string name, string browser_download_url);
+    public record GitHubReleaseAsset(string name, string browser_download_url,
+        long? size = null, string digest = null);
 }

@@ -24,7 +24,17 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Test release selection
+      - name: Download immutable portable test fixture
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'DS4Windows-RC4.5.1-x64.zip'
+          Invoke-WebRequest 'https://github.com/hbashton/DS4Windows/releases/download/VIIPERRC4.5.1/DS4Windows_VIIPER_x64.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '985B7DA39AB682FAE9ED27EC4B1622F58C240911454CFFC29CD661EC13BBA109') {
+            throw 'The immutable RC4.5.1 portable test fixture does not match its pinned SHA-256.'
+          }
+          "DS4UPDATER_RC451_PACKAGE=$archive" >> $env:GITHUB_ENV
+
+      - name: Test release selection and safe portable update
         run: dotnet test .\Updater2.Tests\DS4Updater.Tests.csproj -c Release
 
   build:
@@ -50,7 +60,22 @@ jobs:
 
       - name: Prepare release asset
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
+          $output = '.\bin\${{ matrix.platform }}\Release\output'
+          $files = @(Get-ChildItem -LiteralPath $output -File -Recurse)
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'DS4Updater.exe') {
+            throw 'The portable worker must be published as one self-contained executable.'
+          }
+          [xml]$project = Get-Content -LiteralPath '.\Updater2\DS4Updater.csproj'
+          $expectedVersion = @($project.Project.PropertyGroup.Version | Where-Object { $_ })
+          if ($expectedVersion.Count -ne 1 -or $files[0].VersionInfo.FileVersion -ne $expectedVersion[0]) {
+            throw 'The published updater file version does not match the project.'
+          }
+          if ($env:RELEASE_TAG -and $env:RELEASE_TAG -cne "v$($expectedVersion[0])") {
+            throw 'The release tag does not match the published updater version.'
+          }
           $assetName = if ("${{ matrix.platform }}" -eq "x64") { "DS4Updater.exe" } else { "DS4Updater_x86.exe" }
           Copy-Item ".\bin\${{ matrix.platform }}\Release\output\DS4Updater.exe" ".\bin\${{ matrix.platform }}\Release\$assetName"
           "ASSET_NAME=$assetName" >> $env:GITHUB_ENV
@@ -64,6 +89,7 @@ jobs:
 
       - name: Upload release asset
         if: github.event_name == 'release'
-        run: gh release upload ${{ github.event.release.tag_name }} .\bin\${{ matrix.platform }}\Release\${{ env.ASSET_NAME }} --clobber
+        run: gh release upload "$env:RELEASE_TAG" ".\bin\${{ matrix.platform }}\Release\${{ env.ASSET_NAME }}"
         env:
           GITHUB_TOKEN: ${{ github.TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}

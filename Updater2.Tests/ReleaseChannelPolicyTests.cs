@@ -97,6 +97,58 @@ namespace DS4Updater.Tests
             Assert.AreEqual("VIIPERRC4.2", selected.tag_name);
         }
 
+        [DataTestMethod]
+        [DataRow("VIIPERRC4.5", "VIIPERRC4.3", false)]
+        [DataRow("VIIPERRC4.5", "VIIPERRC4.4", false)]
+        [DataRow("VIIPERRC4.5", "VIIPERRC4.5", false)]
+        [DataRow("VIIPERRC4.5", "VIIPERRC4.5.1", true)]
+        [DataRow("VIIPERRC4.5.1", "VIIPERRC4.5", false)]
+        [DataRow("VIIPERRC4.5.1", "VIIPERRC4.5.1", false)]
+        [DataRow("VIIPERRC4.5.1", "VIIPERRC4.5.2", true)]
+        [DataRow("VIIPERRC4.5.2", "VIIPERRC4.5.1", false)]
+        [DataRow("VIIPERRC4.5.2", "VIIPERRC4.5.2", false)]
+        [DataRow("VIIPERRC4.5.1", "VIIPERRC4.6", true)]
+        [DataRow("VIIPERRC4.5", "VIIPERRC4.10", true)]
+        [DataRow("VIIPERRC4.10", "VIIPERRC4.9", false)]
+        [DataRow("VIIPERRC4", "VIIPERRC4.0", false)]
+        [DataRow("VIIPERRC4", "VIIPERRC4.1", true)]
+        [DataRow("VIIPERRC4.5", "VIIPERBeta9", false)]
+        [DataRow("VIIPERBeta9", "VIIPERRC1", true)]
+        [DataRow("VIIPERBeta8", "VIIPERBeta7", false)]
+        [DataRow("VIIPERBeta", "VIIPERBeta2", true)]
+        [DataRow(" viiperrc4.5 ", "VIIPERRC4.3", false)]
+        [DataRow("VIIPERRC4.5", "VIIPERRC4.5-hotfix-unknown", false)]
+        [DataRow("VIIPERRC4.5", "VIIPERRC9999999999999999999", false)]
+        public void NamedChannelMovesForwardOnlyLikeTheMainApplication(string installed, string candidate, bool update) =>
+            Assert.AreEqual(update, ReleaseChannelPolicy.ShouldUpdate(
+                Release(candidate, true, "2026-09-09T00:00:00Z"), "5.0.5.0", true, installed));
+
+        [DataTestMethod]
+        [DataRow("v5.0.6.0-rc1", "VIIPERRC4.3", false)]
+        [DataRow("v5.0.6.0-rc1", "v5.0.5.0-rc9", false)]
+        [DataRow("v5.0.6.0-rc1", "v5.0.6-rc2", false)]
+        [DataRow("v5.0.6.0-rc1", "v5.0.7.0-rc1", true)]
+        [DataRow(" v5.0.6.0-rc1 ", " v5.0.7.0-rc1 ", true)]
+        [DataRow("v5.0.6.0-rc1", "v5.0.9999999999999-rc1", false)]
+        [DataRow("v5.0.6.0-rc1", "v5.0.7.0.0.0-rc1", false)]
+        [DataRow("v5.0.6.0-rc1", "v5.0.7.0 broken", false)]
+        [DataRow("unrecognized-preview", "VIIPERRC4.3", false)]
+        public void UnknownOrNewNumericMarkersCannotRollBackIntoOldNamedChannel(string installed, string candidate, bool update) =>
+            Assert.AreEqual(update, ReleaseChannelPolicy.ShouldUpdate(
+                Release(candidate, true, "2026-09-09T00:00:00Z"), "5.0.6.0", true, installed));
+
+        [TestMethod]
+        public void StablePromotionIsNormalizedAndNeverAcceptsDraftOrDowngrade()
+        {
+            var stable = Release("v5.0.5", false, "2026-09-09T00:00:00Z");
+            Assert.IsTrue(ReleaseChannelPolicy.ShouldUpdate(stable, "5.0.5.0", true, "VIIPERRC4.5"));
+            Assert.IsFalse(ReleaseChannelPolicy.ShouldUpdate(stable, "5.0.5.1", true, "VIIPERRC4.5.1"));
+            Assert.IsFalse(ReleaseChannelPolicy.ShouldUpdate(stable, "5.0.5.0", false, "v5.0.5.0"));
+            Assert.IsFalse(ReleaseChannelPolicy.ShouldUpdate(stable with { draft = true }, "4.0.0.0", false, null));
+            Assert.IsFalse(ReleaseChannelPolicy.ShouldUpdate(Release("VIIPERRC4.5.1", true,
+                "2026-09-09T00:00:00Z"), "5.0.5.0", false, "v5.0.5"));
+        }
+
         private static GitHubRelease Release(
             string tag,
             bool prerelease,

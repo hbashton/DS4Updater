@@ -38,10 +38,40 @@ namespace DS4Updater
         private string launchExeName;
         private string launchExePath;
         private MainWindow mwd;
+        private bool portableSession;
 
         private void Application_Startup(object sender, StartupEventArgs e)
         {
             RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+
+            // Select this lifetime before parsing or constructing anything in
+            // the legacy updater. Even malformed portable requests must never
+            // fall through to its cleanup or process-termination behavior.
+            if (PortableUpdateRequest.ShouldUsePortableLifetime(e.Args, Environment.ProcessPath))
+            {
+                portableSession = true;
+                try
+                {
+                    string executable = Environment.ProcessPath ?? throw new IOException("The updater path is unavailable.");
+                    PortableUpdateRequest request = PortableUpdateRequest.Parse(e.Args, executable);
+                    if (!request.IsWorker)
+                    {
+                        PortableWorkerSession.Start(request);
+                        Shutdown();
+                        return;
+                    }
+                    PortableWorkerRecord record = PortableWorkerSession.ValidateWorker(request, executable);
+                    MainWindow = new PortableUpdateWindow(request, record);
+                    MainWindow.Show();
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show("The portable update could not start safely. No apps were stopped.\n\n" + error.Message,
+                        "Portable update", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    Shutdown(1);
+                }
+                return;
+            }
 
             launchExePath = Path.Combine(exedirpath, "DS4Windows.exe");
             bool autoLaunch = false;
@@ -94,6 +124,7 @@ namespace DS4Updater
             //Debug.WriteLine(CultureInfo.CurrentCulture);
             this.Exit += (s, e) =>
             {
+                if (portableSession) return;
                 string currentUpdaterPath = Path.Combine(exedirpath, "Update Files", "DS4Windows", "DS4Updater.exe");
                 string tempNewUpdaterPath = Path.Combine(exedirpath, "DS4Updater NEW.exe");
 
@@ -135,6 +166,7 @@ namespace DS4Updater
 
             this.Exit += (s, e) =>
             {
+                if (portableSession) return;
                 if (openingDS4W)
                 {
                     AutoOpenDS4();

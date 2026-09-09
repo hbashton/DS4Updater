@@ -766,11 +766,11 @@ namespace DS4Updater
                 string ds4winversion = File.Exists(exepath + "\\DS4Windows.exe") ?
                     FileVersionInfo.GetVersionInfo(exepath + "\\DS4Windows.exe").FileVersion :
                     string.Empty;
-                bool versionMatches = selectedRelease is not null ?
-                    (!TryParseReleaseVersion(selectedRelease.tag_name, out Version expectedVersion) ||
-                        (TryParseReleaseVersion(ds4winversion, out Version installedVersion) &&
-                            installedVersion == expectedVersion)) :
-                    string.Equals(ds4winversion, newversion.Trim(), StringComparison.OrdinalIgnoreCase);
+                bool versionMatches = ReleaseChannelPolicy.VerifyInstalledIdentity(
+                    selectedRelease?.tag_name ?? newversion.Trim(), ds4winversion,
+                    File.Exists(exepath + "\\DS4Windows.exe") ?
+                        FileVersionInfo.GetVersionInfo(exepath + "\\DS4Windows.exe").ProductVersion : null,
+                    ReadInstalledReleaseTag());
                 if (appExists && versionMatches)
                 {
                     if (selectedRelease is not null)
