@@ -37,6 +37,7 @@ internal sealed class PortablePackageTransaction : IDisposable
     internal bool RecoveryRequired { get; private set; }
     // Deterministic fault injection only; production never assigns this callback.
     internal Action<string, bool> BeforeMutationForTesting { get; set; }
+    internal Action AfterLegacyAdoptionSnapshotForTesting { get; set; }
 
     private PortablePackageTransaction(string target, string transaction, FileStream owner,
         HashSet<string> previous, string previousHash)
@@ -135,7 +136,7 @@ internal sealed class PortablePackageTransaction : IDisposable
         }
     }
 
-    internal void Apply(string customExeBaseName = null)
+    internal void Apply(string customExeBaseName = null, string installedExe = null)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         if (applyAttempted) throw new InvalidOperationException("This portable transaction has already been attempted.");
@@ -150,6 +151,8 @@ internal sealed class PortablePackageTransaction : IDisposable
         var replacements = payloadHashes.Keys.Where(p => !Paths.Equals(p, ManifestName))
             .ToDictionary(p => p, p => Child(StagedRoot, p), Paths);
         HashSet<string> aliases = AddCustomAlias(customExeBaseName, replacements);
+        Dictionary<string, string> legacySnapshots = SnapshotLegacyAliasAdoption(aliases, customExeBaseName, installedExe);
+        AfterLegacyAdoptionSnapshotForTesting?.Invoke();
         // The installed ownership reflects the selected executable name. The
         // verified downloaded payload and its manifest stay untouched.
         string installedManifest = Path.Combine(TransactionRoot, "installed-manifest.txt");
@@ -175,8 +178,11 @@ internal sealed class PortablePackageTransaction : IDisposable
                 ValidateNoReparse(destination);
                 if (Directory.Exists(destination)) throw new IOException("A package file conflicts with a directory: " + change.Relative);
                 change.Existed = File.Exists(destination);
+                if (!change.Existed && legacySnapshots.ContainsKey(change.Relative))
+                    throw new IOException("The verified legacy application disappeared during preflight: " + change.Relative);
                 if (change.Existed && !Paths.Equals(change.Relative, ManifestName) &&
-                    !previousOwnership.Contains(change.Relative) && !aliases.Contains(change.Relative))
+                    !previousOwnership.Contains(change.Relative) &&
+                    !(aliases.Contains(change.Relative) && legacySnapshots.ContainsKey(change.Relative)))
                     throw new IOException("Refusing to overwrite an unowned file: " + change.Relative);
                 if (!change.Existed) continue;
                 // All target locks are obtained before any live file changes.
@@ -184,6 +190,9 @@ internal sealed class PortablePackageTransaction : IDisposable
                 var pin = new FileStream(destination, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
                 locks.Add(change.Relative, pin);
                 change.OriginalHash = HashStream(pin);
+                if (legacySnapshots.TryGetValue(change.Relative, out string legacyHash) &&
+                    !Paths.Equals(change.OriginalHash, legacyHash))
+                    throw new IOException("The verified legacy application changed during preflight: " + change.Relative);
                 change.Attributes = File.GetAttributes(destination);
                 change.LastWriteUtc = File.GetLastWriteTimeUtc(destination);
                 if (Paths.Equals(change.Relative, ManifestName) && !Paths.Equals(change.OriginalHash, previousManifestHash))
@@ -285,6 +294,46 @@ internal sealed class PortablePackageTransaction : IDisposable
         if (Directory.Exists(destination) || File.Exists(destination) != shouldExist ||
             (shouldExist && !Paths.Equals(expectedHash, HashFile(destination))))
             throw new IOException("A portable destination changed during the update; its current contents were preserved: " + change.Relative);
+    }
+
+    private Dictionary<string, string> SnapshotLegacyAliasAdoption(HashSet<string> aliases, string name, string installedExe)
+    {
+        var snapshots = new Dictionary<string, string>(Paths);
+        string[] unowned = aliases.Where(path => !previousOwnership.Contains(path) &&
+            File.Exists(Child(TargetRoot, path))).ToArray();
+        if (unowned.Length == 0 || !Paths.Equals(installedExe, name + ".exe")) return snapshots;
+
+        // Only the exact initiating apphost bound by the worker/process guard
+        // can establish legacy ownership. A newly selected name is never an
+        // invitation to adopt an unrelated file, even if its metadata matches.
+        // Legacy runtime/deps copies must also match their owned counterparts.
+        var pins = new Dictionary<string, FileStream>(Paths);
+        try
+        {
+            string[] evidence = unowned.Append(installedExe).Append("DS4Windows.dll")
+                .Concat(unowned.Where(path => !Paths.Equals(path, installedExe))
+                    .Select(path => "DS4Windows" + path.Substring(name.Length)))
+                .Distinct(Paths).ToArray();
+            foreach (string relative in evidence)
+            {
+                if (!aliases.Contains(relative) && !previousOwnership.Contains(relative))
+                    throw new IOException("Refusing legacy adoption without an owned application dependency: " + relative);
+                string path = Child(TargetRoot, relative);
+                ValidateNoReparse(path);
+                var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                pins.Add(relative, pin);
+                snapshots.Add(relative, HashStream(pin));
+            }
+            // Read the same PE identity used by the coordinator while read
+            // handles deny writes/replacement. Exclusive preflight locks later
+            // recheck every evidence hash before any installed bytes change.
+            PortableUpdateOperations.ReadInstalledIdentity(TargetRoot, installedExe);
+            foreach (string relative in unowned.Where(path => !Paths.Equals(path, installedExe)))
+                if (!Paths.Equals(snapshots[relative], snapshots["DS4Windows" + relative.Substring(name.Length)]))
+                    throw new IOException("Refusing to overwrite an unowned legacy sidecar: " + relative);
+            return snapshots;
+        }
+        finally { foreach (FileStream pin in pins.Values) pin.Dispose(); }
     }
 
     private HashSet<string> AddCustomAlias(string name, Dictionary<string, string> replacements)

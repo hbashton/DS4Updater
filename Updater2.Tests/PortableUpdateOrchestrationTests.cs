@@ -109,7 +109,8 @@ public sealed class PortableUpdateOrchestrationTests
     public async Task PipelinePassesOnlyConfirmedCustomBasenameToTransaction()
     {
         var ops = new FakeOperations();
-        await PortableUpdateCoordinator.ExecuteAsync(Request() with { LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None);
+        ops.SetTarget("VIIPERRC4.6.2", "5.0.8.0");
+        await PortableUpdateCoordinator.ExecuteAsync(Request() with { ReleaseTag = ops.Release.tag_name, LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None);
         Assert.AreEqual("Game.Pad", ops.AppliedAlias);
         CollectionAssert.AreEqual(new[] { "Game.Pad.exe", "DS4Windows.exe", "Game.Pad.exe", "Game.Pad.exe" }, ops.IdentityExecutables);
     }
@@ -121,9 +122,63 @@ public sealed class PortableUpdateOrchestrationTests
     public async Task ChangedNameVerifiesOriginalBeforeApplyAndOnlyDestinationAfterApply(string original, string destination, string alias)
     {
         var ops = new FakeOperations();
-        await PortableUpdateCoordinator.ExecuteAsync(Request() with { LaunchExe = destination, OriginalExe = original }, ops, null, CancellationToken.None);
+        ops.SetTarget("VIIPERRC4.6.2", "5.0.8.0");
+        await PortableUpdateCoordinator.ExecuteAsync(Request() with { ReleaseTag = ops.Release.tag_name, LaunchExe = destination, OriginalExe = original }, ops, null, CancellationToken.None);
         Assert.AreEqual(alias, ops.AppliedAlias);
         CollectionAssert.AreEqual(new[] { original, "DS4Windows.exe", original, destination }, ops.IdentityExecutables);
+    }
+
+    [DataTestMethod]
+    [DataRow("VIIPERRC4.6.1", "5.0.7.0")]
+    [DataRow("VIIPERRC4.6.2", "5.0.7.99")]
+    public async Task CustomOnlyLayoutRejectsAnOlderVerifiedTargetBeforeDownloadOrMutation(string tag, string version)
+    {
+        var ops = new FakeOperations();
+        ops.SetTarget(tag, version);
+        var error = await Assert.ThrowsExceptionAsync<InvalidDataException>(() => PortableUpdateCoordinator.ExecuteAsync(
+            Request() with { ReleaseTag = tag, LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None));
+        StringAssert.Contains(error.Message, "5.0.8.0");
+        CollectionAssert.AreEqual(new[] { "validate", "installed", "fetch", "receipt" }, ops.Events);
+        Assert.IsFalse(ops.Applied);
+    }
+
+    [DataTestMethod]
+    [DataRow("VIIPERRC4.6.2", "5.0.8.0")]
+    [DataRow("VIIPERRC4.6.3", "5.0.8.1")]
+    [DataRow("VIIPERRC5", "6.0.0.0")]
+    public async Task OlderInitiatingAppCanUseTheCompatibleTargetAndFutureVersions(string tag, string version)
+    {
+        var ops = new FakeOperations();
+        ops.SetTarget(tag, version);
+        await PortableUpdateCoordinator.ExecuteAsync(Request() with
+        { ReleaseTag = tag, OriginalExe = "DS4Windows.exe", LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None);
+        Assert.IsTrue(ops.Applied);
+        Assert.AreEqual("Game.Pad", ops.AppliedAlias);
+    }
+
+    [TestMethod]
+    public async Task ClearingACustomNameStillAllowsAnOlderCanonicalLayoutTarget()
+    {
+        var ops = new FakeOperations();
+        ops.SetTarget("VIIPERRC4.6.1", "5.0.7.0");
+        await PortableUpdateCoordinator.ExecuteAsync(Request() with
+        { ReleaseTag = ops.Release.tag_name, OriginalExe = "Game.Pad.exe", LaunchExe = "DS4Windows.exe" },
+            ops, null, CancellationToken.None);
+        Assert.IsTrue(ops.Applied);
+        Assert.IsNull(ops.AppliedAlias);
+    }
+
+    [TestMethod]
+    public async Task CachedOlderPayloadCannotBypassTheCompatibleTargetIdentity()
+    {
+        var ops = new FakeOperations();
+        ops.SetTarget("VIIPERRC4.6.2", "5.0.8.0");
+        ops.Staged = new("5.0.7.0", "VIIPERRC4.6.1", "VIIPERRC4.6.1");
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => PortableUpdateCoordinator.ExecuteAsync(
+            Request() with { ReleaseTag = ops.Release.tag_name, LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None));
+        Assert.IsFalse(ops.Events.Contains("wait"));
+        Assert.IsFalse(ops.Applied);
+        Assert.AreEqual("dispose", ops.Events.Last());
     }
 
     [DataTestMethod]
@@ -309,6 +364,11 @@ public sealed class PortableUpdateOrchestrationTests
         internal Action OnWait;
         internal byte[] ReceiptBytes;
         internal string PreparedTag;
+        internal void SetTarget(string tag, string version)
+        {
+            SetBuildReceipt(tag, version);
+            Staged = new(version, tag, tag);
+        }
         internal void SetBuildReceipt(string tag, string version)
         {
             const long releaseId = 123;

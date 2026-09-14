@@ -375,6 +375,125 @@ public sealed class PortablePackageTransactionTests
     }
 
     [DataTestMethod]
+    [DataRow("DS4Windows.exe", ".exe")]
+    [DataRow("DS4Windows.exe", ".deps.json")]
+    [DataRow("DS4Windows.exe", ".runtimeconfig.json")]
+    [DataRow("Old.Pad.exe", ".exe")]
+    [DataRow("Old.Pad.exe", ".deps.json")]
+    [DataRow("Old.Pad.exe", ".runtimeconfig.json")]
+    public void NewlySelectedAliasCannotOverwriteUnownedFiles(string initiatingExe, string suffix)
+    {
+        using var f = new Fixture();
+        const string name = "New.Pad";
+        f.WriteUser("custom_exe_name.txt", name);
+        if (initiatingExe != "DS4Windows.exe") f.OwnOldFile(initiatingExe, "old owned app");
+        f.WriteUser(name + suffix, "unrelated user data");
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        bool mutated = false;
+        plan.BeforeMutationForTesting = (_, _) => mutated = true;
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply(name, initiatingExe)).Message, "unowned");
+        Assert.IsFalse(mutated);
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [DataTestMethod]
+    [DataRow("DS4Windows.exe")]
+    [DataRow("Old.Pad.exe")]
+    [DataRow(null)]
+    public void MatchingPeMetadataDoesNotAuthorizeAdoptingANewDestination(string initiatingExe)
+    {
+        using var f = new Fixture();
+        f.CreateLegacyAlias("New.Pad");
+        var before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply("New.Pad", initiatingExe)).Message, "unowned");
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [DataTestMethod]
+    [DataRow(false, "Game.Pad.exe")]
+    [DataRow(true, "GAME.PAD.exe")]
+    public void VerifiedInitiatingLegacyAliasAndMatchingSidecarsAreAdopted(bool canonicalExists, string initiatingExe)
+    {
+        using var f = new Fixture();
+        f.CreateLegacyAlias("Game.Pad");
+        if (!canonicalExists) File.Delete(Path.Combine(f.Target, "DS4Windows.exe"));
+        using var plan = f.Prepare();
+        plan.Apply("Game.Pad", initiatingExe);
+        foreach (string suffix in new[] { ".exe", ".deps.json", ".runtimeconfig.json" })
+        {
+            CollectionAssert.AreEqual(f.Payload["DS4Windows" + suffix], File.ReadAllBytes(Path.Combine(f.Target, "Game.Pad" + suffix)));
+            CollectionAssert.Contains(File.ReadAllLines(Path.Combine(f.Target, PortablePackageTransaction.ManifestName)), "Game.Pad" + suffix);
+        }
+        Assert.IsFalse(File.Exists(Path.Combine(f.Target, "DS4Windows.exe")));
+    }
+
+    [DataTestMethod]
+    [DataRow(".deps.json")]
+    [DataRow(".runtimeconfig.json")]
+    public void LegacyInitiatingApphostDoesNotAuthorizeUnrelatedSidecars(string suffix)
+    {
+        using var f = new Fixture();
+        f.CreateLegacyAlias("Game.Pad");
+        f.WriteUser("Game.Pad" + suffix, "unrelated sidecar");
+        var before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply("Game.Pad", "Game.Pad.exe")).Message, "unowned");
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [TestMethod]
+    public void LegacyApphostMustCarryTheInstalledAssemblyIdentity()
+    {
+        using var f = new Fixture();
+        f.CreateLegacyAlias("Game.Pad");
+        f.WriteUser("Game.Pad.exe", "not a verified apphost");
+        var before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        Assert.ThrowsException<InvalidDataException>(() => plan.Apply("Game.Pad", "Game.Pad.exe"));
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [DataTestMethod]
+    [DataRow("Game.Pad.exe", false)]
+    [DataRow("DS4Windows.dll", false)]
+    [DataRow("Game.Pad.deps.json", false)]
+    [DataRow("DS4Windows.deps.json", false)]
+    [DataRow("Game.Pad.exe", true)]
+    public void LegacyAdoptionEvidenceCannotChangeBeforeExclusivePreflight(string relative, bool remove)
+    {
+        using var f = new Fixture();
+        f.CreateLegacyAlias("Game.Pad");
+        using var plan = f.Prepare();
+        Dictionary<string, string> afterConcurrentEdit = null;
+        plan.AfterLegacyAdoptionSnapshotForTesting = () =>
+        {
+            string path = Path.Combine(f.Target, relative);
+            if (remove) File.Delete(path); else File.WriteAllText(path, "concurrent user edit");
+            afterConcurrentEdit = f.LiveSnapshot();
+        };
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply("Game.Pad", "Game.Pad.exe")).Message, "preflight");
+        AssertSnapshot(afterConcurrentEdit, f.LiveSnapshot());
+    }
+
+    [TestMethod]
+    public void AdoptedLegacyAliasesAndOwnershipRollBackOnLateFailure()
+    {
+        using var f = new Fixture();
+        f.CreateLegacyAlias("Game.Pad");
+        var before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        plan.BeforeMutationForTesting = (relative, rollback) =>
+        {
+            if (!rollback && relative == PortablePackageTransaction.ManifestName) throw new IOException("injected late failure");
+        };
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply("Game.Pad", "Game.Pad.exe")).Message, "restored");
+        Assert.IsFalse(plan.RecoveryRequired);
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [DataTestMethod]
     [DataRow(false)]
     [DataRow(true)]
     public void CustomUpdateKeepsOnlyItsSelectedApphostAndAllRequiredDependencies(bool defaultExists)
@@ -382,7 +501,7 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name + "\r\n");
-        f.WriteUser(name + ".exe", "old alias");
+        f.OwnOldFile(name + ".exe", "old alias");
         if (!defaultExists) File.Delete(Path.Combine(f.Target, "DS4Windows.exe"));
         using var plan = f.Prepare();
         plan.Apply(name);
@@ -407,8 +526,8 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name);
-        f.WriteUser(name + ".exe", "old alias");
-        f.WriteUser(name + ".deps.json", "old alias dependencies");
+        f.OwnOldFile(name + ".exe", "old alias");
+        f.OwnOldFile(name + ".deps.json", "old alias dependencies");
         if (!defaultExists) File.Delete(Path.Combine(f.Target, "DS4Windows.exe"));
         Dictionary<string, string> before = f.LiveSnapshot();
         using var plan = f.Prepare();
@@ -437,7 +556,7 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name);
-        f.WriteUser(name + ".exe", "old alias");
+        f.OwnOldFile(name + ".exe", "old alias");
         using (var first = f.Prepare()) first.Apply(name);
         string ownership = File.ReadAllText(Path.Combine(f.Target, PortablePackageTransaction.ManifestName));
         f.Payload["DS4Windows.exe"] = Bytes("next verified apphost");
@@ -463,7 +582,7 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string previous = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", previous);
-        f.WriteUser(previous + ".exe", "old alias");
+        f.OwnOldFile(previous + ".exe", "old alias");
         f.WriteUser("OtherApp.exe", "unowned unrelated app");
         using (var first = f.Prepare()) first.Apply(previous);
         string configuration = Path.Combine(f.Target, "custom_exe_name.txt");
@@ -492,7 +611,7 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name);
-        f.WriteUser(name + ".exe", "old alias");
+        f.OwnOldFile(name + ".exe", "old alias");
         string manifest = Path.Combine(f.Target, PortablePackageTransaction.ManifestName);
         File.WriteAllText(manifest, File.ReadAllText(manifest).Replace("DS4Windows.exe\n", ""));
         Dictionary<string, string> before = f.LiveSnapshot();
@@ -507,7 +626,7 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name);
-        f.WriteUser(name + ".exe", "old alias");
+        f.OwnOldFile(name + ".exe", "old alias");
         using (var first = f.Prepare()) first.Apply(name);
         Dictionary<string, string> before = f.LiveSnapshot();
         using var plan = f.Prepare();
@@ -533,7 +652,7 @@ public sealed class PortablePackageTransactionTests
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name);
-        f.WriteUser(name + ".exe", "old alias");
+        f.OwnOldFile(name + ".exe", "old alias");
         f.Payload[name + suffix] = Bytes("another package component");
         f.BuildArchive();
         Dictionary<string, string> before = f.LiveSnapshot();
@@ -552,7 +671,7 @@ public sealed class PortablePackageTransactionTests
         string configuration = Path.Combine(f.Target, "custom_exe_name.txt");
         f.WriteUser("custom_exe_name.txt", setting);
         string selected = setting == "Game.Pad" ? setting : null;
-        if (selected != null) f.WriteUser(selected + ".exe", "old alias");
+        if (selected != null) f.OwnOldFile(selected + ".exe", "old alias");
         Dictionary<string, string> before = f.LiveSnapshot();
         using var plan = f.Prepare();
         plan.BeforeMutationForTesting = (path, rollback) =>
@@ -602,7 +721,7 @@ public sealed class PortablePackageTransactionTests
     {
         using var f = new Fixture();
         f.WriteUser("custom_exe_name.txt", "Game.Pad\r\n");
-        f.WriteUser("Game.Pad.exe", "old alias");
+        f.OwnOldFile("Game.Pad.exe", "old alias");
         using var plan = f.Prepare();
         plan.Apply("GAME.PAD");
         CollectionAssert.AreEqual(f.Payload["DS4Windows.exe"], File.ReadAllBytes(Path.Combine(f.Target, "Game.Pad.exe")));
@@ -698,6 +817,16 @@ public sealed class PortablePackageTransactionTests
             UserFiles.Remove(relative);
             oldOwnership.Add(relative);
             WriteOldManifest();
+        }
+        internal void CreateLegacyAlias(string name)
+        {
+            WriteUser("custom_exe_name.txt", name);
+            // Passive PE fixture only; neither copied file is loaded/executed.
+            string image = typeof(PortablePackageTransaction).Assembly.Location;
+            File.Copy(image, Path.Combine(Target, "DS4Windows.dll"), true);
+            File.Copy(image, Path.Combine(Target, name + ".exe"));
+            foreach (string suffix in new[] { ".deps.json", ".runtimeconfig.json" })
+                File.Copy(Path.Combine(Target, "DS4Windows" + suffix), Path.Combine(Target, name + suffix));
         }
         internal void WriteUser(string relative, string contents)
         {

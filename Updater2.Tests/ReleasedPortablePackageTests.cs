@@ -16,6 +16,27 @@ public sealed class ReleasedPortablePackageTests
         if (string.IsNullOrWhiteSpace(archive))
             Assert.Inconclusive("Opt in with DS4UPDATER_RC461_PACKAGE pointing to the unchanged RC4.6.1 portable ZIP.");
         const string digest = "0B5B05E491AA01F6EAC58A33B1742FEA62481F7ABDBBC5EBAAE64BE7E7604541";
+        // Low-level transaction regression only. The production coordinator
+        // rejects custom-only layout for this older, incompatible app version.
+        VerifyCustomTransactions(archive, digest, "VIIPERRC4.6.1", "5.0.7.0", 552);
+    }
+
+    [TestMethod]
+    [TestCategory("ReleasedPackage")]
+    public void ActualRc462ArchiveKeepsCustomApphostsAcrossUpdatesAndNameChanges()
+    {
+        string archive = Environment.GetEnvironmentVariable("DS4UPDATER_RC462_PACKAGE");
+        string digest = Environment.GetEnvironmentVariable("DS4UPDATER_RC462_SHA256");
+        if (string.IsNullOrWhiteSpace(archive) && string.IsNullOrWhiteSpace(digest))
+            Assert.Inconclusive("Opt in with DS4UPDATER_RC462_PACKAGE and the independently verified release SHA-256 in DS4UPDATER_RC462_SHA256.");
+        Assert.IsFalse(string.IsNullOrWhiteSpace(archive));
+        Assert.IsTrue(digest != null && digest.Length == 64 && digest.All(Uri.IsHexDigit),
+            "The release-candidate fixture requires an explicit independently verified SHA-256.");
+        VerifyCustomTransactions(archive, digest.ToUpperInvariant(), "VIIPERRC4.6.2", "5.0.8.0", null);
+    }
+
+    private static void VerifyCustomTransactions(string archive, string digest, string tag, string version, int? expectedCount)
+    {
         using (var input = File.OpenRead(archive))
             Assert.AreEqual(digest, Convert.ToHexString(SHA256.HashData(input)));
 
@@ -51,13 +72,14 @@ public sealed class ReleasedPortablePackageTests
                 using var expected = entry.Open();
                 expectedHashes.Add(relative, Convert.ToHexString(SHA256.HashData(expected)));
             }
-            Assert.AreEqual(552, expectedHashes.Count, "This fixture must retain the complete published RC4.6.1 payload.");
+            if (expectedCount.HasValue) Assert.AreEqual(expectedCount.Value, expectedHashes.Count);
+            Assert.IsTrue(expectedHashes.Count >= 500, "The real fixture must retain the complete portable payload.");
             string previous = null;
             foreach (string name in new[] { "Game.Pad", "Controller Companion" })
             {
                 string setting = name + "\r\n";
                 File.WriteAllText(Path.Combine(target, "custom_exe_name.txt"), setting);
-                using (var transaction = PortablePackageTransaction.Prepare(target, archive, digest, "VIIPERRC4.6.1"))
+                using (var transaction = PortablePackageTransaction.Prepare(target, archive, digest, tag))
                 {
                     transaction.Apply(name);
                     Assert.IsFalse(transaction.RecoveryRequired);
@@ -78,7 +100,7 @@ public sealed class ReleasedPortablePackageTests
                 CollectionAssert.AreEquivalent(expectedOwnership,
                     File.ReadAllLines(Path.Combine(target, PortablePackageTransaction.ManifestName)));
                 using var operations = new PortableUpdateOperations(root, null);
-                Assert.AreEqual(new PortableInstalledIdentity("5.0.7.0", "VIIPERRC4.6.1", "VIIPERRC4.6.1"),
+                Assert.AreEqual(new PortableInstalledIdentity(version, tag, tag),
                     operations.ReadIdentity(target, name + ".exe"));
                 Assert.IsFalse(File.Exists(Path.Combine(target, "DS4Windows.exe")));
                 if (previous != null)

@@ -1,7 +1,7 @@
 # DS4Windows #99 — custom portable executable updates
 
 Source fix for [DS4Windows issue #99](https://github.com/hbashton/DS4Windows/issues/99).
-This is **unreleased source**, not a replacement for published updater 2.0.6.
+This fix is prepared for updater **2.0.7**; publication is coordinated separately.
 
 The old transaction added the configured alias while also reinstalling the
 default `DS4Windows.exe`. The corrected transaction installs the apphost under
@@ -56,3 +56,14 @@ ownership manifest when staging infrastructure setup. Do not independently
 publish this updater and claim those older application builds also contain the
 staging fix. A release must either supply the compatible application package or
 explicitly gate the new installed-layout behavior to a compatible release.
+
+Updater 2.0.7 enforces that boundary in the production worker before downloading
+or preparing the ZIP: a custom-named destination requires the verified target
+Windows binary version **5.0.8.0** (RC4.6.2) or later. Older target requests fail
+without live changes, preserving their existing layout. Canonical-name updates,
+including clearing a custom name, retain the existing historical update path.
+Older initiating applications can still update to compatible newer targets;
+future versions remain supported through verified release build records. The
+staged PE identity must match that record, so a cached older archive cannot
+bypass this gate. The RC4.6.1 fixture above covers low-level transaction mechanics,
+not permission for the production coordinator to install its custom-only layout.

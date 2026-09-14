@@ -32,6 +32,12 @@ internal interface IPortableUpdateOperations
 
 internal static class PortableUpdateCoordinator
 {
+    // RC4.6.2 first stages infrastructure setup from a custom-only apphost
+    // manifest. Older target binaries require the canonical host to remain.
+    // Gate the verified destination, not the initiating application or tag:
+    // older clients can upgrade safely and future build records still work.
+    private static readonly Version MinimumCustomOnlyLayoutVersion = new(5, 0, 8, 0);
+
     internal static async Task<PortableReleaseIdentity> ExecuteAsync(PortableUpdateRequest request, IPortableUpdateOperations operations,
         IProgress<PortableUpdateProgress> progress, CancellationToken cancellation)
     {
@@ -50,6 +56,10 @@ internal static class PortableUpdateCoordinator
         PortableReleaseIdentity resolved = await ResolveReleaseAsync(release, "x64", operations, cancellation).ConfigureAwait(false);
         if (!resolved.IsNonDowngradingBinary(installed.FileVersion))
             throw new InvalidDataException("The requested release would downgrade the installed Windows binaries.");
+        if (request.CustomExeBaseName != null && resolved.FileVersion < MinimumCustomOnlyLayoutVersion)
+            throw new InvalidDataException("Updating a custom-named portable copy requires DS4Windows RC4.6.2 " +
+                "(Windows binary version 5.0.8.0) or later. This older target requires a canonical executable layout. " +
+                "Your installed files have not been changed; select a compatible newer release.");
         GitHubReleaseAsset asset = resolved.Asset;
         ReleaseChannelPolicy.TryGetAssetSha256(asset, out string digest);
         progress?.Report(new("Downloading the verified portable package…"));
@@ -107,13 +117,15 @@ internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDis
             throw new ArgumentOutOfRangeException(nameof(transferTimeout));
         client = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false })
             { Timeout = TimeSpan.FromSeconds(45) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("DS4Windows-Portable-Updater/2.0.6");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("DS4Windows-Portable-Updater/2.0.7");
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
     }
 
     public string ValidateRoot(string target) => PortableUpdateProcessGuard.ValidateTargetRoot(target);
 
-    public PortableInstalledIdentity ReadIdentity(string root, string launchExe)
+    public PortableInstalledIdentity ReadIdentity(string root, string launchExe) => ReadInstalledIdentity(root, launchExe);
+
+    internal static PortableInstalledIdentity ReadInstalledIdentity(string root, string launchExe)
     {
         string executable = Path.Combine(root, launchExe);
         string assembly = Path.Combine(root, "DS4Windows.dll");
@@ -246,7 +258,7 @@ internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDis
     }
 
     public IPortablePreparedPackage Prepare(string target, string archive, string digest, string tag) =>
-        new PreparedPackage(PortablePackageTransaction.Prepare(target, archive, digest, tag));
+        new PreparedPackage(PortablePackageTransaction.Prepare(target, archive, digest, tag), worker?.Request.InstalledExe);
 
     public async Task WaitForQuiescenceAsync(PortableUpdateRequest request, CancellationToken cancellation)
     {
@@ -273,9 +285,11 @@ internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDis
     private sealed class PreparedPackage : IPortablePreparedPackage
     {
         private readonly PortablePackageTransaction transaction;
-        internal PreparedPackage(PortablePackageTransaction value) { transaction = value; }
+        private readonly string installedExe;
+        internal PreparedPackage(PortablePackageTransaction value, string installedExe)
+        { transaction = value; this.installedExe = installedExe; }
         public string StagedRoot => transaction.StagedRoot;
-        public void Apply(string customExeBaseName) => transaction.Apply(customExeBaseName);
+        public void Apply(string customExeBaseName) => transaction.Apply(customExeBaseName, installedExe);
         public void Dispose() => transaction.Dispose();
     }
 }

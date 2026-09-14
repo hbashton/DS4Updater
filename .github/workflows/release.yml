@@ -34,8 +34,21 @@ jobs:
           }
           "DS4UPDATER_RC451_PACKAGE=$archive" >> $env:GITHUB_ENV
 
+      - name: Download immutable custom-name transaction fixture
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'DS4Windows-RC4.6.1-x64.zip'
+          Invoke-WebRequest 'https://github.com/hbashton/DS4Windows/releases/download/VIIPERRC4.6.1/DS4Windows_VIIPER_x64.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '0B5B05E491AA01F6EAC58A33B1742FEA62481F7ABDBBC5EBAAE64BE7E7604541') {
+            throw 'The immutable RC4.6.1 custom-name transaction fixture does not match its pinned SHA-256.'
+          }
+          "DS4UPDATER_RC461_PACKAGE=$archive" >> $env:GITHUB_ENV
+
       - name: Test release selection and safe portable update
         run: dotnet test .\Updater2.Tests\DS4Updater.Tests.csproj -c Release
+
+      - name: Test immutable release asset verification
+        run: pwsh -NoProfile -File .\.github\scripts\Test-ReleaseAssetVerification.ps1
 
   build:
     needs: test
@@ -89,7 +102,30 @@ jobs:
 
       - name: Upload release asset
         if: github.event_name == 'release'
-        run: gh release upload "$env:RELEASE_TAG" ".\bin\${{ matrix.platform }}\Release\${{ env.ASSET_NAME }}"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . '.\.github\scripts\ReleaseAssetVerification.ps1'
+          $head = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the build commit.' }
+          $tagCommit = (git rev-parse "$($env:RELEASE_TAG)^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $tagCommit -or $head -cne $env:GITHUB_SHA) {
+            throw 'The release tag, event commit and built source do not match.'
+          }
+          $path = ".\bin\${{ matrix.platform }}\Release\${{ env.ASSET_NAME }}"
+          $file = Get-Item -LiteralPath $path
+          $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.tag_name -cne $env:RELEASE_TAG) { throw 'The exact release could not be verified.' }
+          if (!(Test-ExistingReleaseAsset -Assets @($release.assets) -ExpectedName $env:ASSET_NAME -ExpectedSize $file.Length -ExpectedSha256 $hash)) {
+            gh release upload "$env:RELEASE_TAG" "$path"
+            if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }
+            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or !(Test-ExistingReleaseAsset -Assets @($release.assets) -ExpectedName $env:ASSET_NAME -ExpectedSize $file.Length -ExpectedSha256 $hash)) {
+              throw 'The uploaded asset could not be verified.'
+            }
+          }
+          Write-Host "Verified immutable release asset $env:ASSET_NAME ($($file.Length) bytes, SHA-256 $hash)."
         env:
           GITHUB_TOKEN: ${{ github.TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
