@@ -49,3 +49,10 @@ Evidence: `_results/issue99-final/issue99-final.trx`. All filesystem transaction
 target generated disposable fixtures. No DS4Windows, broker, installer or updater
 executable is launched, and no production folder or real user profile is changed.
 This does not claim a live GUI update/reboot test or public delivery.
+
+Delivery must coordinate with the DS4Windows custom-only manifest staging fix.
+Older DS4Windows builds expect the canonical executable in their installed
+ownership manifest when staging infrastructure setup. Do not independently
+publish this updater and claim those older application builds also contain the
+staging fix. A release must either supply the compatible application package or
+explicitly gate the new installed-layout behavior to a compatible release.
