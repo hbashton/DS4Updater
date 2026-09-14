@@ -374,30 +374,254 @@ public sealed class PortablePackageTransactionTests
         Assert.IsTrue(Directory.Exists(first.StagedRoot));
     }
 
-    [TestMethod]
-    public void ValidatedExistingCustomNameReceivesExactAliasesWithoutChangingItsConfiguration()
+    [DataTestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void CustomUpdateKeepsOnlyItsSelectedApphostAndAllRequiredDependencies(bool defaultExists)
     {
         using var f = new Fixture();
         const string name = "Game.Pad";
         f.WriteUser("custom_exe_name.txt", name + "\r\n");
         f.WriteUser(name + ".exe", "old alias");
+        if (!defaultExists) File.Delete(Path.Combine(f.Target, "DS4Windows.exe"));
         using var plan = f.Prepare();
         plan.Apply(name);
         foreach (string suffix in new[] { ".exe", ".runtimeconfig.json", ".deps.json" })
             CollectionAssert.AreEqual(f.Payload["DS4Windows" + suffix], File.ReadAllBytes(Path.Combine(f.Target, name + suffix)));
+        foreach (string required in new[] { "DS4Windows.dll", "DS4Windows.runtimeconfig.json", "DS4Windows.deps.json" })
+            CollectionAssert.AreEqual(f.Payload[required], File.ReadAllBytes(Path.Combine(f.Target, required)));
+        Assert.IsFalse(File.Exists(Path.Combine(f.Target, "DS4Windows.exe")));
         Assert.AreEqual(name + "\r\n", File.ReadAllText(Path.Combine(f.Target, "custom_exe_name.txt")));
-        StringAssert.Contains(File.ReadAllText(Path.Combine(f.Target, PortablePackageTransaction.ManifestName)), name + ".exe\n");
+        CollectionAssert.AreEquivalent(f.Payload.Keys.Where(p => p != "DS4Windows.exe")
+                .Concat(new[] { name + ".exe", name + ".runtimeconfig.json", name + ".deps.json" }).ToArray(),
+            File.ReadAllLines(Path.Combine(f.Target, PortablePackageTransaction.ManifestName)));
+        Assert.AreEqual(f.ManifestText(), File.ReadAllText(Path.Combine(plan.StagedRoot, PortablePackageTransaction.ManifestName)));
+        CollectionAssert.AreEqual(f.Payload["DS4Windows.exe"], File.ReadAllBytes(Path.Combine(plan.StagedRoot, "DS4Windows.exe")));
+    }
+
+    [DataTestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void CustomUpdateLateFailureRestoresBothApphostStatesAndOwnership(bool defaultExists)
+    {
+        using var f = new Fixture();
+        const string name = "Game.Pad";
+        f.WriteUser("custom_exe_name.txt", name);
+        f.WriteUser(name + ".exe", "old alias");
+        f.WriteUser(name + ".deps.json", "old alias dependencies");
+        if (!defaultExists) File.Delete(Path.Combine(f.Target, "DS4Windows.exe"));
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        bool reachedPublication = false;
+        bool installedOnlySelectedApphost = false;
+        plan.BeforeMutationForTesting = (path, rollback) =>
+        {
+            if (!rollback && path == PortablePackageTransaction.ManifestName)
+            {
+                reachedPublication = true;
+                installedOnlySelectedApphost = !File.Exists(Path.Combine(f.Target, "DS4Windows.exe")) &&
+                    f.Payload["DS4Windows.exe"].SequenceEqual(File.ReadAllBytes(Path.Combine(f.Target, name + ".exe")));
+                throw new IOException("injected final ownership publication failure");
+            }
+        };
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply(name)).Message, "restored");
+        Assert.IsTrue(reachedPublication);
+        Assert.IsTrue(installedOnlySelectedApphost);
+        Assert.IsFalse(plan.RecoveryRequired);
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [TestMethod]
+    public void ConsecutiveCustomUpdatesRefreshTheAliasWithoutRecreatingTheDefaultApphost()
+    {
+        using var f = new Fixture();
+        const string name = "Game.Pad";
+        f.WriteUser("custom_exe_name.txt", name);
+        f.WriteUser(name + ".exe", "old alias");
+        using (var first = f.Prepare()) first.Apply(name);
+        string ownership = File.ReadAllText(Path.Combine(f.Target, PortablePackageTransaction.ManifestName));
+        f.Payload["DS4Windows.exe"] = Bytes("next verified apphost");
+        f.Payload["DS4Windows.dll"] = Bytes("next verified assembly");
+        f.Payload["DS4Windows.runtimeconfig.json"] = Bytes("next runtime configuration");
+        f.Payload["DS4Windows.deps.json"] = Bytes("next dependencies");
+        f.BuildArchive();
+        using (var second = f.Prepare()) second.Apply(name);
+        Assert.IsFalse(File.Exists(Path.Combine(f.Target, "DS4Windows.exe")));
+        foreach (string suffix in new[] { ".exe", ".runtimeconfig.json", ".deps.json" })
+            CollectionAssert.AreEqual(f.Payload["DS4Windows" + suffix], File.ReadAllBytes(Path.Combine(f.Target, name + suffix)));
+        CollectionAssert.AreEqual(f.Payload["DS4Windows.dll"], File.ReadAllBytes(Path.Combine(f.Target, "DS4Windows.dll")));
+        Assert.AreEqual(ownership, File.ReadAllText(Path.Combine(f.Target, PortablePackageTransaction.ManifestName)));
+    }
+
+    [DataTestMethod]
+    [DataRow("Next.Pad")]
+    [DataRow(null)]
+    [DataRow("")]
+    [DataRow("DS4Windows")]
+    public void ChangedOrClearedCustomNameRetiresOnlyPreviouslyOwnedAliases(string setting)
+    {
+        using var f = new Fixture();
+        const string previous = "Game.Pad";
+        f.WriteUser("custom_exe_name.txt", previous);
+        f.WriteUser(previous + ".exe", "old alias");
+        f.WriteUser("OtherApp.exe", "unowned unrelated app");
+        using (var first = f.Prepare()) first.Apply(previous);
+        string configuration = Path.Combine(f.Target, "custom_exe_name.txt");
+        if (setting == null) File.Delete(configuration);
+        else File.WriteAllText(configuration, setting);
+        string selected = setting == "Next.Pad" ? setting : null;
+        using (var second = f.Prepare()) second.Apply(selected);
+        string[] ownership = File.ReadAllLines(Path.Combine(f.Target, PortablePackageTransaction.ManifestName));
+        foreach (string suffix in new[] { ".exe", ".runtimeconfig.json", ".deps.json" })
+        {
+            Assert.IsFalse(File.Exists(Path.Combine(f.Target, previous + suffix)));
+            CollectionAssert.DoesNotContain(ownership, previous + suffix);
+        }
+        string expectedExe = (selected ?? "DS4Windows") + ".exe";
+        CollectionAssert.AreEqual(f.Payload["DS4Windows.exe"], File.ReadAllBytes(Path.Combine(f.Target, expectedExe)));
+        CollectionAssert.Contains(ownership, expectedExe);
+        Assert.AreEqual(selected == null, File.Exists(Path.Combine(f.Target, "DS4Windows.exe")));
+        Assert.AreEqual("unowned unrelated app", File.ReadAllText(Path.Combine(f.Target, "OtherApp.exe")));
+        if (setting == null) Assert.IsFalse(File.Exists(configuration));
+        else Assert.AreEqual(setting, File.ReadAllText(configuration));
+    }
+
+    [TestMethod]
+    public void CustomUpdateRejectsAnUnownedDefaultApphostBeforeChangingLiveFiles()
+    {
+        using var f = new Fixture();
+        const string name = "Game.Pad";
+        f.WriteUser("custom_exe_name.txt", name);
+        f.WriteUser(name + ".exe", "old alias");
+        string manifest = Path.Combine(f.Target, PortablePackageTransaction.ManifestName);
+        File.WriteAllText(manifest, File.ReadAllText(manifest).Replace("DS4Windows.exe\n", ""));
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply(name)).Message, "unowned");
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [TestMethod]
+    public void ConcurrentDefaultApphostIsPreservedAndCustomUpdateRollsBack()
+    {
+        using var f = new Fixture();
+        const string name = "Game.Pad";
+        f.WriteUser("custom_exe_name.txt", name);
+        f.WriteUser(name + ".exe", "old alias");
+        using (var first = f.Prepare()) first.Apply(name);
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        plan.BeforeMutationForTesting = (path, rollback) =>
+        {
+            if (!rollback && path == "DS4Windows.exe")
+                File.WriteAllText(Path.Combine(f.Target, path), "new unrelated app");
+        };
+        Assert.ThrowsException<IOException>(() => plan.Apply(name));
+        Assert.AreEqual("new unrelated app", File.ReadAllText(Path.Combine(f.Target, "DS4Windows.exe")));
+        Dictionary<string, string> after = f.LiveSnapshot();
+        after.Remove("DS4Windows.exe");
+        AssertSnapshot(before, after);
+        Assert.IsFalse(plan.RecoveryRequired);
+    }
+
+    [DataTestMethod]
+    [DataRow(".exe")]
+    [DataRow(".runtimeconfig.json")]
+    [DataRow(".deps.json")]
+    public void CustomNameCannotReplaceAnotherPackagedComponent(string suffix)
+    {
+        using var f = new Fixture();
+        const string name = "Game.Pad";
+        f.WriteUser("custom_exe_name.txt", name);
+        f.WriteUser(name + ".exe", "old alias");
+        f.Payload[name + suffix] = Bytes("another package component");
+        f.BuildArchive();
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        StringAssert.Contains(Assert.ThrowsException<InvalidDataException>(() => plan.Apply(name)).Message, "conflicts");
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [DataTestMethod]
+    [DataRow("Game.Pad")]
+    [DataRow("")]
+    [DataRow("DS4Windows")]
+    public void ExistingCustomSettingCannotChangeDuringApplyOrRollback(string setting)
+    {
+        using var f = new Fixture();
+        string configuration = Path.Combine(f.Target, "custom_exe_name.txt");
+        f.WriteUser("custom_exe_name.txt", setting);
+        string selected = setting == "Game.Pad" ? setting : null;
+        if (selected != null) f.WriteUser(selected + ".exe", "old alias");
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        plan.BeforeMutationForTesting = (path, rollback) =>
+        {
+            if (rollback) Assert.ThrowsException<IOException>(() => File.Delete(configuration));
+            else if (path == PortablePackageTransaction.ManifestName)
+                File.WriteAllText(configuration, "Another.Pad");
+        };
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply(selected)).Message, "restored");
+        AssertSnapshot(before, f.LiveSnapshot());
+        Assert.IsFalse(plan.RecoveryRequired);
+        File.WriteAllText(configuration, "Another.Pad"); // Apply released its setting lock.
+    }
+
+    [TestMethod]
+    public void NewlyConfiguredCustomNameIsPreservedAndApplyRollsBack()
+    {
+        using var f = new Fixture();
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        plan.BeforeMutationForTesting = (path, rollback) =>
+        {
+            if (!rollback && path == PortablePackageTransaction.ManifestName)
+                File.WriteAllText(Path.Combine(f.Target, "custom_exe_name.txt"), "Game.Pad");
+        };
+        StringAssert.Contains(Assert.ThrowsException<IOException>(() => plan.Apply()).Message, "restored");
+        Assert.AreEqual("Game.Pad", File.ReadAllText(Path.Combine(f.Target, "custom_exe_name.txt")));
+        Dictionary<string, string> after = f.LiveSnapshot();
+        after.Remove("custom_exe_name.txt");
+        AssertSnapshot(before, after);
+        Assert.IsFalse(plan.RecoveryRequired);
+    }
+
+    [TestMethod]
+    public void DefaultUpdateCannotIgnoreAnActiveCustomName()
+    {
+        using var f = new Fixture();
+        f.WriteUser("custom_exe_name.txt", "Game.Pad");
+        Dictionary<string, string> before = f.LiveSnapshot();
+        using var plan = f.Prepare();
+        Assert.ThrowsException<InvalidDataException>(() => plan.Apply());
+        AssertSnapshot(before, f.LiveSnapshot());
+    }
+
+    [TestMethod]
+    public void CustomRequestUsesWindowsNameComparisonWithoutRewritingTheSetting()
+    {
+        using var f = new Fixture();
+        f.WriteUser("custom_exe_name.txt", "Game.Pad\r\n");
+        f.WriteUser("Game.Pad.exe", "old alias");
+        using var plan = f.Prepare();
+        plan.Apply("GAME.PAD");
+        CollectionAssert.AreEqual(f.Payload["DS4Windows.exe"], File.ReadAllBytes(Path.Combine(f.Target, "Game.Pad.exe")));
+        Assert.IsFalse(File.Exists(Path.Combine(f.Target, "DS4Windows.exe")));
+        Assert.AreEqual("Game.Pad\r\n", File.ReadAllText(Path.Combine(f.Target, "custom_exe_name.txt")));
     }
 
     [DataTestMethod]
     [DataRow("../outside")]
     [DataRow("viiper")]
     [DataRow("DS4Updater")]
+    [DataRow("HidGuardHelper")]
+    [DataRow("Updater")]
+    [DataRow("CLOCK$")]
     [DataRow("not-configured")]
     public void UnsafeOrUnconfirmedAliasesCannotTouchLiveFiles(string requested)
     {
         using var f = new Fixture();
-        f.WriteUser("custom_exe_name.txt", "GamePad");
+        f.WriteUser("custom_exe_name.txt", requested == "not-configured" ? "GamePad" : requested);
         Dictionary<string, string> before = f.LiveSnapshot();
         using var plan = f.Prepare();
         Assert.ThrowsException<InvalidDataException>(() => plan.Apply(requested));

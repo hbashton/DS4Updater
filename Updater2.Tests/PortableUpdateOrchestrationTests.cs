@@ -111,6 +111,19 @@ public sealed class PortableUpdateOrchestrationTests
         var ops = new FakeOperations();
         await PortableUpdateCoordinator.ExecuteAsync(Request() with { LaunchExe = "Game.Pad.exe" }, ops, null, CancellationToken.None);
         Assert.AreEqual("Game.Pad", ops.AppliedAlias);
+        CollectionAssert.AreEqual(new[] { "Game.Pad.exe", "DS4Windows.exe", "Game.Pad.exe", "Game.Pad.exe" }, ops.IdentityExecutables);
+    }
+
+    [DataTestMethod]
+    [DataRow("Game.Pad.exe", "New.Pad.exe", "New.Pad")]
+    [DataRow("Game.Pad.exe", "DS4Windows.exe", null)]
+    [DataRow("DS4Windows.exe", "Game.Pad.exe", "Game.Pad")]
+    public async Task ChangedNameVerifiesOriginalBeforeApplyAndOnlyDestinationAfterApply(string original, string destination, string alias)
+    {
+        var ops = new FakeOperations();
+        await PortableUpdateCoordinator.ExecuteAsync(Request() with { LaunchExe = destination, OriginalExe = original }, ops, null, CancellationToken.None);
+        Assert.AreEqual(alias, ops.AppliedAlias);
+        CollectionAssert.AreEqual(new[] { original, "DS4Windows.exe", original, destination }, ops.IdentityExecutables);
     }
 
     [DataTestMethod]
@@ -283,6 +296,7 @@ public sealed class PortableUpdateOrchestrationTests
     private sealed class FakeOperations : IPortableUpdateOperations, IPortablePreparedPackage
     {
         internal readonly List<string> Events = new();
+        internal readonly List<string> IdentityExecutables = new();
         internal PortableInstalledIdentity Installed = new("5.0.4.0", "VIIPERRC4.4", "VIIPERRC4.4");
         internal PortableInstalledIdentity Staged = new("5.0.5.0", "VIIPERRC4.5", "VIIPERRC4.5");
         internal GitHubRelease Release = new("VIIPERRC4.5", true, false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
@@ -318,6 +332,7 @@ public sealed class PortableUpdateOrchestrationTests
         public string ValidateRoot(string target) { Events.Add("validate"); return target; }
         public PortableInstalledIdentity ReadIdentity(string root, string launchExe)
         {
+            IdentityExecutables.Add(launchExe);
             Events.Add(root == StagedRoot ? "staged" : "installed");
             return root == StagedRoot || Applied ? Staged : Installed;
         }

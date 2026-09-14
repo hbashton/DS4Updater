@@ -43,6 +43,8 @@ public sealed class PortableUpdateNetworkAndEntryTests
         Assert.AreEqual(fixture.Record, PortableWorkerSession.ValidateWorker(fixture.Request, fixture.Executable, root => root));
         Assert.ThrowsException<InvalidDataException>(() => PortableWorkerSession.ValidateWorker(
             fixture.Request with { ReleaseTag = "VIIPERRC4.4" }, fixture.Executable, root => root));
+        Assert.ThrowsException<InvalidDataException>(() => PortableWorkerSession.ValidateWorker(
+            fixture.Request with { OriginalExe = "Other.exe" }, fixture.Executable, root => root));
         File.WriteAllText(fixture.Executable, "a changed worker image");
         Assert.ThrowsException<InvalidDataException>(() => PortableWorkerSession.ValidateWorker(fixture.Request, fixture.Executable, root => root));
     }

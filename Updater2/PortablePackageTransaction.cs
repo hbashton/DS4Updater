@@ -146,17 +146,22 @@ internal sealed class PortablePackageTransaction : IDisposable
         foreach (var payload in payloadHashes)
             if (!Paths.Equals(payload.Value, HashFile(Child(StagedRoot, payload.Key))))
                 throw new InvalidDataException("A staged payload changed after verification: " + payload.Key);
+        using FileStream configuration = LockCustomConfiguration(customExeBaseName);
         var replacements = payloadHashes.Keys.Where(p => !Paths.Equals(p, ManifestName))
             .ToDictionary(p => p, p => Child(StagedRoot, p), Paths);
         HashSet<string> aliases = AddCustomAlias(customExeBaseName, replacements);
-        // Alias entries are local ownership derived only from the existing,
-        // validated custom-name setting; the downloaded manifest stays untouched.
+        // The installed ownership reflects the selected executable name. The
+        // verified downloaded payload and its manifest stay untouched.
         string installedManifest = Path.Combine(TransactionRoot, "installed-manifest.txt");
         WriteTextNew(installedManifest, string.Join("\n", replacements.Keys.OrderBy(p => p, StringComparer.Ordinal)) + "\n");
         replacements.Add(ManifestName, installedManifest);
         var changes = replacements.Select(p => new Change(p.Key, p.Value, HashFile(p.Value))).ToList();
         foreach (string stale in previousOwnership)
             if (!replacements.ContainsKey(stale)) changes.Add(new Change(stale, null, null));
+        if (aliases.Count != 0 && !previousOwnership.Contains("DS4Windows.exe"))
+            // Also guard an absent default apphost. An unowned copy must fail
+            // preflight, and a newly appearing copy must never be deleted.
+            changes.Add(new Change("DS4Windows.exe", null, null));
         // The manifest is the final ownership publication, never the first mutation.
         changes = changes.OrderBy(c => Paths.Equals(c.Relative, ManifestName) ? 1 : 0)
             .ThenBy(c => c.Relative, StringComparer.Ordinal).ToList();
@@ -204,6 +209,7 @@ internal sealed class PortablePackageTransaction : IDisposable
             {
                 if (locks.Remove(change.Relative, out FileStream pin)) pin.Dispose();
                 BeforeMutationForTesting?.Invoke(change.Relative, false);
+                RequireConfigurationUnchanged(configuration);
                 RequireUnchangedDestination(change, applied: false);
                 if (change.Source == null)
                 {
@@ -218,9 +224,10 @@ internal sealed class PortablePackageTransaction : IDisposable
             foreach (Change change in changes)
             {
                 string destination = Child(TargetRoot, change.Relative);
-                if (change.Source == null ? File.Exists(destination) : !Paths.Equals(change.NewHash, HashFile(destination)))
+                if (change.Source == null ? File.Exists(destination) || Directory.Exists(destination) : !Paths.Equals(change.NewHash, HashFile(destination)))
                     throw new IOException("Final portable payload verification failed: " + change.Relative);
             }
+            RequireConfigurationUnchanged(configuration);
             WriteJournal("committed", changes);
         }
         catch (Exception failure)
@@ -288,9 +295,8 @@ internal sealed class PortablePackageTransaction : IDisposable
         if (name.Contains('/') || name.Length > 100 ||
             Paths.Equals(name, "viiper") || Paths.Equals(name, "DS4Updater"))
             throw new InvalidDataException("The custom executable name is unsafe.");
-        string configured = ReadBoundedText(Child(TargetRoot, "custom_exe_name.txt"), 512).Trim();
-        if (!string.Equals(configured, name, StringComparison.Ordinal))
-            throw new InvalidDataException("The custom executable name does not match the existing configuration.");
+        try { PortableUpdateProcessGuard.ValidateCustomExeName(name + ".exe"); }
+        catch (ArgumentException error) { throw new InvalidDataException("The custom executable name is unsafe.", error); }
         if (Paths.Equals(name, "DS4Windows")) return aliases;
         foreach (string suffix in new[] { ".exe", ".runtimeconfig.json", ".deps.json" })
         {
@@ -300,7 +306,45 @@ internal sealed class PortablePackageTransaction : IDisposable
             replacements.Add(relative, Child(StagedRoot, "DS4Windows" + suffix));
             aliases.Add(relative);
         }
+        // The apphost still targets DS4Windows.dll, whose canonical runtime
+        // configuration and dependencies remain required. Only the default
+        // executable is replaced by its configured name.
+        replacements.Remove("DS4Windows.exe");
         return aliases;
+    }
+
+    private FileStream LockCustomConfiguration(string requestedName)
+    {
+        string path = Child(TargetRoot, "custom_exe_name.txt");
+        ValidateNoReparse(path);
+        FileStream pin;
+        try { pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (FileNotFoundException) when (requestedName == null) { return null; }
+        try
+        {
+            if (pin.Length > 512) throw new InvalidDataException("Portable metadata is oversized.");
+            using var buffer = new MemoryStream();
+            CopyBounded(pin, buffer, pin.Length);
+            string configured = StrictUtf8.GetString(buffer.ToArray()).TrimStart('\uFEFF').Trim();
+            string expected = requestedName ?? "";
+            if (Paths.Equals(configured, "DS4Windows")) configured = "";
+            if (Paths.Equals(expected, "DS4Windows")) expected = "";
+            if (!string.Equals(configured, expected, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The custom executable name does not match the existing configuration.");
+            // This read handle denies writes and deletion until apply and any
+            // rollback finish, preserving the exact setting we validated.
+            return pin;
+        }
+        catch { pin.Dispose(); throw; }
+    }
+
+    private void RequireConfigurationUnchanged(FileStream configuration)
+    {
+        if (configuration != null) return; // Its open handle prevents changes.
+        string path = Child(TargetRoot, "custom_exe_name.txt");
+        ValidateNoReparse(path);
+        if (File.Exists(path) || Directory.Exists(path))
+            throw new IOException("The custom executable setting changed during the update. Retry the update.");
     }
 
     private void ReplaceFromVerifiedCopy(string source, string relative, string expectedHash, bool overwrite)

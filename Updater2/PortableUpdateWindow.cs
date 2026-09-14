@@ -129,7 +129,7 @@ internal sealed class PortableUpdateWindow : Window
         try
         {
             await new PortableUpdateProcessGuard().WaitForQuiescenceAsync(request.TargetDirectory, request.LaunchExe,
-                timeout: TimeSpan.FromSeconds(1));
+                timeout: TimeSpan.FromSeconds(1), originalExeName: request.InstalledExe);
             PortableWorkerSession.ValidateLaunchConfiguration(request);
             using var operations = new PortableUpdateOperations(Path.GetDirectoryName(Environment.ProcessPath), worker);
             PortableInstalledIdentity identity = operations.ReadIdentity(request.TargetDirectory, request.LaunchExe);

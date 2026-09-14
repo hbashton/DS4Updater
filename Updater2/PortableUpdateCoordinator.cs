@@ -40,7 +40,7 @@ internal static class PortableUpdateCoordinator
         if (!string.Equals(target, request.TargetDirectory, StringComparison.OrdinalIgnoreCase))
             throw new IOException("The selected portable root changed.");
         cancellation.ThrowIfCancellationRequested();
-        PortableInstalledIdentity installed = operations.ReadIdentity(target, request.LaunchExe);
+        PortableInstalledIdentity installed = operations.ReadIdentity(target, request.InstalledExe);
         progress?.Report(new("Checking the exact requested release…"));
         GitHubRelease release = await operations.FetchReleaseAsync(request.ReleaseTag, cancellation).ConfigureAwait(false);
         if (release == null || release.draft || !string.Equals(release.tag_name, request.ReleaseTag, StringComparison.Ordinal) ||
@@ -65,7 +65,7 @@ internal static class PortableUpdateCoordinator
         cancellation.ThrowIfCancellationRequested();
         if (!string.Equals(operations.ValidateRoot(target), target, StringComparison.OrdinalIgnoreCase))
             throw new IOException("The portable root changed before installation.");
-        if (operations.ReadIdentity(target, request.LaunchExe) != installed)
+        if (operations.ReadIdentity(target, request.InstalledExe) != installed)
             throw new IOException("The installed application identity changed while the update was prepared. Retry the update.");
         cancellation.ThrowIfCancellationRequested();
         // From here ordinary failures are handled by the file transaction's
@@ -264,8 +264,9 @@ internal sealed class PortableUpdateOperations : IPortableUpdateOperations, IDis
         }
         catch (ArgumentException) { } // The original PID has already exited.
         await new PortableUpdateProcessGuard().WaitForQuiescenceAsync(request.TargetDirectory, request.LaunchExe,
-            request.ParentPid, request.ParentStartUtcTicks, cancellationToken: cancellation).ConfigureAwait(false);
-        PortableWorkerSession.ValidateLaunchConfiguration(request);
+            request.ParentPid, request.ParentStartUtcTicks, cancellationToken: cancellation,
+            originalExeName: request.InstalledExe).ConfigureAwait(false);
+        PortableWorkerSession.ValidateLaunchConfiguration(request, beforeUpdate: true);
     }
 
     public void Dispose() => client.Dispose();

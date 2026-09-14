@@ -35,7 +35,8 @@ internal sealed class PortableUpdateProcessGuard
 
     internal async Task<string> WaitForQuiescenceAsync(string root, string customExeName = null,
         int? parentProcessId = null, long? parentStartUtcTicks = null,
-        TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        TimeSpan? timeout = null, CancellationToken cancellationToken = default,
+        string originalExeName = null)
     {
         TimeSpan budget = timeout ?? TimeSpan.FromSeconds(30);
         if (budget <= TimeSpan.Zero || budget > TimeSpan.FromSeconds(30))
@@ -44,10 +45,13 @@ internal sealed class PortableUpdateProcessGuard
             parentProcessId is <= 0 || parentStartUtcTicks is <= 0 || parentStartUtcTicks > DateTime.MaxValue.Ticks)
             throw new ArgumentException("The parent process ID and its UTC start ticks must be supplied together and be valid.");
         string alias = ValidateCustomExeName(customExeName);
+        string original = ValidateCustomExeName(originalExeName);
         cancellationToken.ThrowIfCancellationRequested();
         string target = validateRoot(root);
         var appPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Path.Combine(target, "DS4Windows.exe") };
         if (alias != null) appPaths.Add(Path.Combine(target, alias));
+        string originalPath = original == null ? null : Path.Combine(target, original);
+        if (originalPath != null) appPaths.Add(originalPath);
         var targetPaths = new HashSet<string>(appPaths, StringComparer.OrdinalIgnoreCase)
         {
             Path.Combine(target, "viiper.exe"),
@@ -87,7 +91,8 @@ internal sealed class PortableUpdateProcessGuard
                     throw new PortableUpdateProcessGuardException("A running app's location could not be verified. " + CloseApps, error);
                 }
                 bool originalParent = parentProcessId == process.ProcessId && parentStartUtcTicks == process.StartTimeUtcTicks;
-                if (originalParent && !appPaths.Contains(image))
+                if (originalParent && (!appPaths.Contains(image) ||
+                    (originalPath != null && !string.Equals(image, originalPath, StringComparison.OrdinalIgnoreCase))))
                     throw new PortableUpdateProcessGuardException("The initiating DS4Windows process does not belong to this portable folder. The update was not started.");
                 // A reused parent PID is not the old parent. It is considered
                 // only if its independently verified image belongs to target.

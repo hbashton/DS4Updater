@@ -134,6 +134,33 @@ public class PortableUpdateProcessGuardTests
     }
 
     [TestMethod]
+    public async Task NameChangeWaitsForOldNewAndCanonicalApphostsWithoutStoppingAnything()
+    {
+        var host = new FakeHost { Read = count => count == 1 ? new[]
+        {
+            Live(7, "Old Pad.exe"), Live(8, "New Pad.exe"), Live(9, "DS4Windows.exe"),
+        } : Array.Empty<PortableUpdateProcessObservation>() };
+        await new PortableUpdateProcessGuard(host, root => root).WaitForQuiescenceAsync(
+            Root, "New Pad.exe", 7, ParentStart, originalExeName: "Old Pad.exe");
+        Assert.IsTrue(host.RequestedNames.Contains("Old Pad"));
+        Assert.IsTrue(host.RequestedNames.Contains("New Pad"));
+        Assert.IsTrue(host.RequestedNames.Contains("DS4Windows"));
+        Assert.AreEqual(1, host.Delays);
+    }
+
+    [DataTestMethod]
+    [DataRow("New Pad.exe")]
+    [DataRow("DS4Windows.exe")]
+    public async Task ParentPidCannotAuthorizeADifferentApphostDuringNameChange(string actual)
+    {
+        var host = new FakeHost { Read = _ => new[] { Live(7, actual) } };
+        await Assert.ThrowsExceptionAsync<PortableUpdateProcessGuardException>(() =>
+            new PortableUpdateProcessGuard(host, root => root).WaitForQuiescenceAsync(
+                Root, "New Pad.exe", 7, ParentStart, originalExeName: "Old Pad.exe"));
+        Assert.AreEqual(0, host.Delays);
+    }
+
+    [TestMethod]
     public async Task MissingParentAlreadyExitedDoesNotPreventAnOtherwiseQuietUpdate()
     {
         var host = new FakeHost();
